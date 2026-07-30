@@ -36,10 +36,10 @@ function main() {
   const readme = readFileSync(README_FILE, 'utf-8');
 
   // Replace the pinned version reference in the "Securing your workflows" section
-  // e.g. uses: shaftoe/pi-coding-agent-action@v2.8.0 -> uses: shaftoe/pi-coding-agent-action@v2.9.0
+  // Migrate the existing upstream pin while bumping future fork-owned pins.
   const updated = readme.replace(
-    /(uses:\s*shaftoe\/pi-coding-agent-action@)v\d+\.\d+\.\d+/,
-    `$1v${version}`
+    /uses:\s*(?:shaftoe|PCD-Cooperation)\/pi-coding-agent-action@v\d+\.\d+\.\d+/,
+    `uses: PCD-Cooperation/pi-coding-agent-action@v${version}`
   );
 
   if (updated === readme) {

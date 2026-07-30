@@ -113,7 +113,7 @@ async function main() {
         version: lastTag.replace(/^v/, ''),
       },
       nextRelease: { gitTag: `v${version}`, gitHead: commits[0]!.hash, version },
-      options: { repositoryUrl: 'https://github.com/shaftoe/pi-coding-agent-action' },
+      options: { repositoryUrl: 'https://github.com/PCD-Cooperation/pi-coding-agent-action' },
     }
   );
 
