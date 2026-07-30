@@ -21,6 +21,7 @@ import {
   apiBaseUrlFromServerUrl,
 } from '@alexanderfortin/pi-platform-github';
 import { resolveServerUrl } from './server-url';
+import { registerBundledOAuthFlows } from './bundled-oauth';
 
 /**
  * Configure the Pi SDK's package directory for the bundled action.
@@ -54,6 +55,7 @@ export async function run() {
   // Set PI_PACKAGE_DIR once at startup so the SDK's getPackageDir()
   // resolves to the bundled assets in dist/pi-sdk/.
   ensurePackageDirOverride();
+  registerBundledOAuthFlows();
 
   const coreAdapter = new RealCoreAdapter();
   const config = gatherActionsConfig();
