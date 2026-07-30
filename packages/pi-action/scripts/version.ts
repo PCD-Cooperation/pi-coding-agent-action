@@ -8,8 +8,8 @@
  *
  * ## Version scheme
  *
- * - **Release builds** (built from a release branch like `v2`): bare semver,
- *   e.g. `2.19.3`
+ * - **Release builds** (built from a release branch like `v2`, or with
+ *   `PI_ACTION_RELEASE_BUILD=true`): bare semver, e.g. `2.19.3`
  * - **Development builds** (built from any other branch):
  *   `<base>-<branch>.<sha>`, e.g. `2.19.3-develop.9272858`
  * - **Local builds** (no CI env vars):
@@ -58,9 +58,9 @@ export function sanitizeSemverIdent(ident: string): string {
  * Compose the action version string from the base version and ambient
  * GitHub-native env vars.
  *
- * - **Release branch** (`GITHUB_REF_NAME` matches `/^v\d+$/`): bare semver,
- *   e.g. `2.19.3`.
- * - **Any other branch**: `<base>-<branch>.<sha>` (semver prerelease),
+ * - **Release build** (`PI_ACTION_RELEASE_BUILD=true`, or `GITHUB_REF_NAME`
+ *   matches `/^v\d+$/`): bare semver, e.g. `2.19.3`.
+ * - **Any other build**: `<base>-<branch>.<sha>` (semver prerelease),
  *   e.g. `2.19.3-develop.9272858`.
  * - **No env vars** (local build): `<base>-unknown.unknown`.
  *
@@ -69,9 +69,10 @@ export function sanitizeSemverIdent(ident: string): string {
 export function composeActionVersion(
   baseVersion: string,
   branch: string = resolveBranch(),
-  sha: string = resolveSha()
+  sha: string = resolveSha(),
+  releaseBuild: boolean = process.env.PI_ACTION_RELEASE_BUILD === 'true'
 ): string {
-  if (RELEASE_BRANCH_RE.test(branch)) {
+  if (releaseBuild || RELEASE_BRANCH_RE.test(branch)) {
     return baseVersion;
   }
   return `${baseVersion}-${sanitizeSemverIdent(branch)}.${sanitizeSemverIdent(sha)}`;

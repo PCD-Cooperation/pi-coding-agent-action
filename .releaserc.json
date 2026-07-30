@@ -26,7 +26,14 @@
     [
       "@semantic-release/git",
       {
-        "assets": ["package.json", "packages/*/package.json", "pnpm-lock.yaml", "CHANGELOG.md", "README.md", "dist/index.js"],
+        "assets": [
+          "package.json",
+          "packages/*/package.json",
+          "pnpm-lock.yaml",
+          "CHANGELOG.md",
+          "README.md",
+          "dist/**"
+        ],
         "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
       }
     ],

@@ -66,6 +66,10 @@ describe('composeActionVersion', () => {
     expect(composeActionVersion('2.19.3', 'develop', '9272858')).toBe('2.19.3-develop.9272858');
   });
 
+  test('returns bare version for an explicit release build from develop', () => {
+    expect(composeActionVersion('2.19.3', 'develop', '9272858', true)).toBe('2.19.3');
+  });
+
   test('sanitizes branch names with slashes', () => {
     expect(composeActionVersion('2.19.3', 'feature/foo', 'abcdef12')).toBe(
       '2.19.3-feature-foo.abcdef12'
@@ -123,6 +127,27 @@ describe('composeActionVersion', () => {
         delete process.env.GITHUB_REF_NAME;
       } else {
         process.env.GITHUB_REF_NAME = origRef;
+      }
+    }
+  });
+
+  test('reads bare version when PI_ACTION_RELEASE_BUILD is true', () => {
+    const origRef = process.env.GITHUB_REF_NAME;
+    const origReleaseBuild = process.env.PI_ACTION_RELEASE_BUILD;
+    try {
+      process.env.GITHUB_REF_NAME = 'develop';
+      process.env.PI_ACTION_RELEASE_BUILD = 'true';
+      expect(composeActionVersion('2.19.3')).toBe('2.19.3');
+    } finally {
+      if (origRef === undefined) {
+        delete process.env.GITHUB_REF_NAME;
+      } else {
+        process.env.GITHUB_REF_NAME = origRef;
+      }
+      if (origReleaseBuild === undefined) {
+        delete process.env.PI_ACTION_RELEASE_BUILD;
+      } else {
+        process.env.PI_ACTION_RELEASE_BUILD = origReleaseBuild;
       }
     }
   });

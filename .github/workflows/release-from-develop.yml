@@ -1,0 +1,71 @@
+name: Release from develop
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  # Serialize with develop.yml, which can also commit and push to develop.
+  group: develop-pipeline
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Validate and release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout develop
+        uses: actions/checkout@v7
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Verify release baseline
+        run: |
+          set -euo pipefail
+          baseline_tag="v$(node -p "require('./package.json').version")"
+          if ! baseline_commit="$(git rev-parse "refs/tags/${baseline_tag}^{commit}" 2>/dev/null)"; then
+            echo "::error::Release baseline ${baseline_tag} is missing. Mirror that upstream tag before the first fork release."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${baseline_commit}" HEAD; then
+            echo "::error::Release baseline ${baseline_tag} is not an ancestor of develop."
+            exit 1
+          fi
+          echo "Using release baseline ${baseline_tag} (${baseline_commit})"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate
+        run: pnpm run validate
+
+      - name: Test
+        run: pnpm test
+
+      - name: End-to-end test
+        run: pnpm run test:e2e
+        env:
+          E2E_PROVIDER: ${{ vars.PROVIDER }}
+          E2E_MODEL: ${{ vars.MODEL_LIGHT }}
+          E2E_TOKEN: ${{ secrets.API_KEY }}
+          E2E_MODEL_CUSTOM: ${{ vars.MODEL_CUSTOM }}
+          E2E_PROVIDER_CUSTOM: ${{ vars.PROVIDER_CUSTOM }}
+          E2E_TOKEN_CUSTOM: ${{ secrets.API_KEY_CUSTOM }}
+
+      - name: Release
+        run: pnpm exec semantic-release --branches develop
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PI_ACTION_RELEASE_BUILD: 'true'
