@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.27.0] - 2026-07-30
+
+### Added
+
+- migrate from Bun to Node + Vitest + pnpm (#392)
+- opt tools into strict sampling, bump Pi to v0.82.1 (#393)
+
+### Changed
+
+- **deps-ci**: bump actions/setup-node from 6 to 7 (#389)
+- **deps**: update dependencies, Pi to v0.80.10 (#388)
+- **deps**: update dependencies, Pi to v0.81.1 (#390)
+
+### Fixed
+
+- dispose Pi sessions after orchestration
+
 ## [2.26.0] - 2026-07-16
 
 ### Added
@@ -617,7 +634,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README link corrections
 - Codecov action updated, removed double build
 
-[unreleased]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.26.0...HEAD
+[unreleased]: https://github.com/PCD-Cooperation/pi-coding-agent-action/compare/v2.27.0...HEAD
+[2.27.0]: https://github.com/PCD-Cooperation/pi-coding-agent-action/compare/v2.26.0...v2.27.0
 [2.26.0]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.25.1...v2.26.0
 [2.25.1]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.25.0...v2.25.1
 [2.25.0]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.24.0...v2.25.0
