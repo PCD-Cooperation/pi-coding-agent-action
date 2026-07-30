@@ -57,7 +57,7 @@ Create a workflow file, e.g., `.github/workflows/pi-agent.yml`. See the [interac
 The `develop` branch is in constant development while the `v2` branch is considered stable, if you don't want the bleeding edge you can pin to a specific release, e.g.
 
 ```yaml
-   uses: PCD-Cooperation/pi-coding-agent-action@v2.27.0
+   uses: PCD-Cooperation/pi-coding-agent-action@v2.27.1
 ```
 
 > [!NOTE]
