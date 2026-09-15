@@ -7,6 +7,7 @@
 
 import type { Temporal } from '@js-temporal/polyfill';
 import type { CreateReactionType, PlatformProvider } from './platform';
+import type { OpengistExpiration } from './share/opengist';
 
 /**
  * Platform-neutral logging interface.
@@ -267,6 +268,13 @@ export interface PiConfig extends DiffConfig {
    * falls back to {@link githubToken} when unset, so a single token suffices.
    */
   shareGistToken?: string;
+  /**
+   * Time-to-live for shared Opengist gists (`'1hour' | '12hours' | '1day' |
+   * '7days' | '15days' | 'never'`). Defaults to `'7days'` when unset (or when
+   * the provider is `'github'`, which has no TTL support). Shared sessions are
+   * ephemeral CI artifacts, so they expire unless this is set to `'never'`.
+   */
+  shareGistExpiration?: OpengistExpiration;
   /** Override the default system prompt. */
   systemPrompt?: string;
   /** Working directory. Defaults to `process.cwd()`. */

@@ -425,6 +425,10 @@ describe('createFinalComment', () => {
       comment_id: 789,
       body: expect.stringContaining(body),
     });
+    // Review-comment replies use the dedicated review marker (not the
+    // top-level issue-comment marker) so they can be found + overwritten later.
+    expect((call[0] as { body: string }).body).toContain('<!-- pi-coding-agent-review-comment -->');
+    expect((call[0] as { body: string }).body).not.toContain('<!-- pi-coding-agent-comment -->');
   });
 
   test('creates top-level issue comment when not PR review comment', async () => {
@@ -444,6 +448,9 @@ describe('createFinalComment', () => {
       issue_number: 123,
       body: expect.stringContaining(body),
     });
+    // Top-level issue/PR comments use the issue marker.
+    expect(arg.body).toContain('<!-- pi-coding-agent-comment -->');
+    expect(arg.body).not.toContain('<!-- pi-coding-agent-review-comment -->');
   });
 
   test('creates top-level comment for pull_request_review event (no comment in payload)', async () => {
@@ -480,6 +487,8 @@ describe('createFinalComment', () => {
       .calls[0] as unknown[];
     const commentBody = (call[0] as { body: string }).body;
     expect(commentBody).toContain(body);
+    expect(commentBody).toContain('<!-- pi-coding-agent-review-comment -->');
+    expect(commentBody).not.toContain('<!-- pi-coding-agent-comment -->');
   });
 
   test('returns undefined when no issue/PR number in context (unattended mode)', async () => {
@@ -541,5 +550,639 @@ describe('createFinalComment', () => {
     const result = await createFinalComment(deps, body, {});
 
     expect(result).toBeUndefined();
+  });
+});
+
+describe('createFinalComment with updateComment', () => {
+  test('updates previous bot comment when updateComment is true and comment exists', async () => {
+    const mockUpdateComment = vi.fn(() =>
+      Promise.resolve({
+        data: {
+          id: 42,
+          body: 'updated body',
+          html_url: 'https://github.com/test-owner/test-repo/issues/123#issuecomment-42',
+        },
+        headers: {},
+        status: 200,
+        url: '',
+      })
+    );
+    const mockListComments = vi.fn(() =>
+      Promise.resolve({
+        data: [
+          {
+            id: 42,
+            body: '<!-- pi-coding-agent-comment -->\nolder bot response',
+            user: { type: 'Bot', login: 'pi-coding-agent[bot]' },
+          },
+          { id: 43, body: 'some other comment', user: { type: 'User', login: 'octocat' } },
+        ],
+        headers: {},
+        status: 200,
+        url: '',
+      })
+    );
+
+    const deps = {
+      ...createTestDeps(),
+      updateComment: true,
+      octokit: {
+        rest: {
+          issues: {
+            createComment: vi.fn(),
+            listComments: mockListComments,
+            updateComment: mockUpdateComment,
+          },
+          pulls: {
+            createReplyForReviewComment: vi.fn(),
+          },
+        },
+      } as any,
+    };
+
+    await createFinalComment(deps, 'New response', {});
+
+    expect(mockListComments).toHaveBeenCalled();
+    expect(mockUpdateComment).toHaveBeenCalled();
+    const updateCall = mockUpdateComment.mock.calls[0] as unknown[] | undefined;
+    expect(updateCall).toBeDefined();
+    const callArg0 = updateCall![0] as {
+      owner: string;
+      repo: string;
+      comment_id: number;
+      body: string;
+    };
+    expect(callArg0).toMatchObject({
+      owner: 'test-owner',
+      repo: 'test-repo',
+      comment_id: 42,
+      body: expect.stringContaining('New response'),
+    });
+    expect(callArg0.body).toContain('<!-- pi-coding-agent-comment -->');
+  });
+
+  test('creates new comment when updateComment is true but no previous bot comment exists', async () => {
+    const mockListComments = vi.fn(() =>
+      Promise.resolve({
+        data: [{ id: 43, body: 'some other comment' }],
+        headers: {},
+        status: 200,
+        url: '',
+      })
+    );
+
+    const deps = {
+      ...createTestDeps(),
+      updateComment: true,
+      octokit: {
+        rest: {
+          issues: {
+            createComment: vi.fn(() =>
+              Promise.resolve({ data: { id: 99 }, headers: {}, status: 201, url: '' })
+            ),
+            listComments: mockListComments,
+            updateComment: vi.fn(),
+          },
+          pulls: {
+            createReplyForReviewComment: vi.fn(),
+          },
+        },
+      } as any,
+    };
+
+    await createFinalComment(deps, 'New response', {});
+
+    expect(mockListComments).toHaveBeenCalled();
+    expect(deps.octokit.rest.issues.createComment).toHaveBeenCalled();
+    expect(deps.octokit.rest.issues.updateComment).not.toHaveBeenCalled();
+  });
+
+  test('creates new comment when updateComment is false', async () => {
+    const mockListComments = vi.fn();
+
+    const deps = {
+      ...createTestDeps(),
+      updateComment: false,
+      octokit: {
+        rest: {
+          issues: {
+            createComment: vi.fn(() =>
+              Promise.resolve({ data: { id: 99 }, headers: {}, status: 201, url: '' })
+            ),
+            listComments: mockListComments,
+            updateComment: vi.fn(),
+          },
+          pulls: {
+            createReplyForReviewComment: vi.fn(),
+          },
+        },
+      } as any,
+    };
+
+    await createFinalComment(deps, 'New response', {});
+
+    expect(mockListComments).not.toHaveBeenCalled();
+    expect(deps.octokit.rest.issues.createComment).toHaveBeenCalled();
+    expect(deps.octokit.rest.issues.updateComment).not.toHaveBeenCalled();
+  });
+
+  test('updates previous bot review comment reply when updateComment is true and reply exists', async () => {
+    const mockUpdateReviewComment = vi.fn(() =>
+      Promise.resolve({
+        data: {
+          id: 501,
+          body: 'updated reply',
+          html_url: 'https://github.com/test-owner/test-repo/pull/123#discussion_r501',
+        },
+        headers: {},
+        status: 200,
+        url: '',
+      })
+    );
+    const mockListReviewComments = vi.fn(() =>
+      Promise.resolve({
+        data: [
+          {
+            id: 501,
+            body: '<!-- pi-coding-agent-review-comment -->\nprevious reply',
+            in_reply_to_id: 789,
+            user: { type: 'Bot', login: 'pi-coding-agent[bot]' },
+          },
+          {
+            id: 502,
+            body: 'some other review comment',
+            in_reply_to_id: 789,
+            user: { type: 'User', login: 'octocat' },
+          },
+        ],
+        headers: {},
+        status: 200,
+        url: '',
+      })
+    );
+
+    const deps = {
+      ...createTestDeps({
+        comment: {
+          id: 789,
+          body: 'inline comment on code',
+          pull_request_review_id: 456,
+        },
+      }),
+      updateComment: true,
+      octokit: {
+        rest: {
+          issues: { createComment: vi.fn(), listComments: vi.fn(), updateComment: vi.fn() },
+          pulls: {
+            createReplyForReviewComment: vi.fn(),
+            listReviewComments: mockListReviewComments,
+            updateReviewComment: mockUpdateReviewComment,
+          },
+        },
+      } as any,
+    };
+
+    await createFinalComment(deps, 'Updated review reply', {});
+
+    expect(mockListReviewComments).toHaveBeenCalledWith(
+      expect.objectContaining({ pull_number: 123, owner: 'test-owner', repo: 'test-repo' })
+    );
+    expect(mockUpdateReviewComment).toHaveBeenCalled();
+    // Must NOT have fallen through to creating a new reply.
+    expect(deps.octokit.rest.pulls.createReplyForReviewComment).not.toHaveBeenCalled();
+
+    const updateCall = mockUpdateReviewComment.mock.calls[0] as unknown[] | undefined;
+    expect(updateCall).toBeDefined();
+    const callArg0 = updateCall![0] as {
+      owner: string;
+      repo: string;
+      comment_id: number;
+      body: string;
+    };
+    expect(callArg0).toMatchObject({
+      owner: 'test-owner',
+      repo: 'test-repo',
+      comment_id: 501,
+      body: expect.stringContaining('Updated review reply'),
+    });
+    expect(callArg0.body).toContain('<!-- pi-coding-agent-review-comment -->');
+  });
+
+  test('creates new review comment reply when updateComment is true but no previous bot reply exists', async () => {
+    const mockListReviewComments = vi.fn(() =>
+      Promise.resolve({
+        data: [{ id: 502, body: 'some other review comment', in_reply_to_id: 789 }],
+        headers: {},
+        status: 200,
+        url: '',
+      })
+    );
+
+    const deps = {
+      ...createTestDeps({
+        comment: {
+          id: 789,
+          body: 'inline comment on code',
+          pull_request_review_id: 456,
+        },
+      }),
+      updateComment: true,
+      octokit: {
+        rest: {
+          issues: { createComment: vi.fn(), listComments: vi.fn(), updateComment: vi.fn() },
+          pulls: {
+            createReplyForReviewComment: vi.fn(() =>
+              Promise.resolve({ data: { id: 999 }, headers: {}, status: 201, url: '' })
+            ),
+            listReviewComments: mockListReviewComments,
+            updateReviewComment: vi.fn(),
+          },
+        },
+      } as any,
+    };
+
+    await createFinalComment(deps, 'New reply', {});
+
+    expect(mockListReviewComments).toHaveBeenCalled();
+    expect(deps.octokit.rest.pulls.createReplyForReviewComment).toHaveBeenCalled();
+    expect(deps.octokit.rest.pulls.updateReviewComment).not.toHaveBeenCalled();
+
+    const call = (deps.octokit.rest.pulls.createReplyForReviewComment as any).mock
+      .calls[0] as unknown[];
+    expect(call[0]).toMatchObject({
+      pull_number: 123,
+      comment_id: 789,
+      body: expect.stringContaining('New reply'),
+    });
+    expect((call[0] as { body: string }).body).toContain('<!-- pi-coding-agent-review-comment -->');
+  });
+
+  test('migrates a previous bot review reply tagged with the old issue marker onto the review marker', async () => {
+    // Simulates a review reply created by a pre-fix version of the action,
+    // which tagged the reply with the (issue) BOT_COMMENT_MARKER. The update
+    // path should still recognise it and rewrite it with the review marker
+    // so the upgrade transition leaves no duplicate behind.
+    const mockUpdateReviewComment = vi.fn(() =>
+      Promise.resolve({
+        data: { id: 501, body: 'updated', html_url: '' },
+        headers: {},
+        status: 200,
+        url: '',
+      })
+    );
+    const mockListReviewComments = vi.fn(() =>
+      Promise.resolve({
+        data: [
+          {
+            id: 501,
+            body: '<!-- pi-coding-agent-comment -->\nprevious reply',
+            in_reply_to_id: 789,
+            user: { type: 'Bot', login: 'pi-coding-agent[bot]' },
+          },
+        ],
+        headers: {},
+        status: 200,
+        url: '',
+      })
+    );
+
+    const deps = {
+      ...createTestDeps({
+        comment: {
+          id: 789,
+          body: 'inline comment on code',
+          pull_request_review_id: 456,
+        },
+      }),
+      updateComment: true,
+      octokit: {
+        rest: {
+          issues: { createComment: vi.fn(), listComments: vi.fn(), updateComment: vi.fn() },
+          pulls: {
+            createReplyForReviewComment: vi.fn(),
+            listReviewComments: mockListReviewComments,
+            updateReviewComment: mockUpdateReviewComment,
+          },
+        },
+      } as any,
+    };
+
+    await createFinalComment(deps, 'Migrated reply', {});
+
+    expect(mockUpdateReviewComment).toHaveBeenCalled();
+    expect(deps.octokit.rest.pulls.createReplyForReviewComment).not.toHaveBeenCalled();
+
+    const updateCall = mockUpdateReviewComment.mock.calls[0] as unknown[] | undefined;
+    expect(updateCall).toBeDefined();
+    const callArg0 = updateCall![0] as {
+      comment_id: number;
+      body: string;
+    };
+    expect(callArg0).toMatchObject({
+      comment_id: 501,
+      body: expect.stringContaining('Migrated reply'),
+    });
+    // Rewritten with the review marker (migration) ...
+    expect(callArg0.body).toContain('<!-- pi-coding-agent-review-comment -->');
+    // ... and no longer tagged with the old issue marker.
+    expect(callArg0.body).not.toContain('<!-- pi-coding-agent-comment -->');
+  });
+
+  test('updates only the review reply in the current thread, ignoring other threads', async () => {
+    // A reply authored by the bot but to a DIFFERENT inline comment must not be
+    // overwritten by a re-trigger on comment 789 — a new reply is created instead.
+    const mockListReviewComments = vi.fn(() =>
+      Promise.resolve({
+        data: [
+          {
+            id: 501,
+            body: '<!-- pi-coding-agent-review-comment -->\nreply to OTHER comment',
+            in_reply_to_id: 999,
+          },
+        ],
+        headers: {},
+        status: 200,
+        url: '',
+      })
+    );
+    const mockUpdateReviewComment = vi.fn();
+
+    const deps = {
+      ...createTestDeps({
+        comment: {
+          id: 789,
+          body: 'inline comment on code',
+          pull_request_review_id: 456,
+        },
+      }),
+      updateComment: true,
+      octokit: {
+        rest: {
+          issues: { createComment: vi.fn(), listComments: vi.fn(), updateComment: vi.fn() },
+          pulls: {
+            createReplyForReviewComment: vi.fn(() =>
+              Promise.resolve({ data: { id: 888 }, headers: {}, status: 201, url: '' })
+            ),
+            listReviewComments: mockListReviewComments,
+            updateReviewComment: mockUpdateReviewComment,
+          },
+        },
+      } as any,
+    };
+
+    await createFinalComment(deps, 'Fresh reply for thread 789', {});
+
+    expect(mockUpdateReviewComment).not.toHaveBeenCalled();
+    expect(deps.octokit.rest.pulls.createReplyForReviewComment).toHaveBeenCalled();
+  });
+
+  test('does not consult review comments when the trigger is a top-level issue comment', async () => {
+    const mockListComments = vi.fn(() =>
+      Promise.resolve({
+        data: [
+          {
+            id: 42,
+            body: '<!-- pi-coding-agent-comment -->\nprevious response',
+            user: { type: 'Bot', login: 'pi-coding-agent[bot]' },
+          },
+        ],
+        headers: {},
+        status: 200,
+        url: '',
+      })
+    );
+    const mockListReviewComments = vi.fn();
+    const mockUpdateComment = vi.fn(() =>
+      Promise.resolve({ data: { id: 42, body: 'x' }, headers: {}, status: 200, url: '' })
+    );
+
+    const deps = {
+      ...createTestDeps(), // top-level issue_comment trigger (no pull_request_review_id)
+      updateComment: true,
+      octokit: {
+        rest: {
+          issues: {
+            createComment: vi.fn(),
+            listComments: mockListComments,
+            updateComment: mockUpdateComment,
+          },
+          pulls: {
+            createReplyForReviewComment: vi.fn(),
+            listReviewComments: mockListReviewComments,
+            updateReviewComment: vi.fn(),
+          },
+        },
+      } as any,
+    };
+
+    await createFinalComment(deps, 'New response', {});
+
+    expect(mockListComments).toHaveBeenCalled();
+    expect(mockListReviewComments).not.toHaveBeenCalled();
+    expect(mockUpdateComment).toHaveBeenCalled();
+  });
+
+  test('updates the most recent bot comment when multiple exist (ordering fix)', async () => {
+    // Regression test for the ordering bug: GitHub returns comments in ascending
+    // ID order (oldest first) by default. The bot markers two comments — an
+    // older one (id 42) and a newer one (id 88). The code must update id 88,
+    // not id 42, by selecting the match with the highest ID.
+    const mockUpdateComment = vi.fn(() =>
+      Promise.resolve({
+        data: { id: 88, body: 'updated', html_url: '' },
+        headers: {},
+        status: 200,
+        url: '',
+      })
+    );
+    const mockListComments = vi.fn(() =>
+      Promise.resolve({
+        data: [
+          {
+            id: 42,
+            body: '<!-- pi-coding-agent-comment -->\nolder bot response',
+            user: { type: 'Bot', login: 'pi-coding-agent[bot]' },
+          },
+          {
+            id: 88,
+            body: '<!-- pi-coding-agent-comment -->\nnewer bot response',
+            user: { type: 'Bot', login: 'pi-coding-agent[bot]' },
+          },
+        ],
+        headers: {},
+        status: 200,
+        url: '',
+      })
+    );
+
+    const deps = {
+      ...createTestDeps(),
+      updateComment: true,
+      octokit: {
+        rest: {
+          issues: {
+            createComment: vi.fn(),
+            listComments: mockListComments,
+            updateComment: mockUpdateComment,
+          },
+          pulls: {
+            createReplyForReviewComment: vi.fn(),
+          },
+        },
+      } as any,
+    };
+
+    await createFinalComment(deps, 'Latest response', {});
+
+    expect(mockUpdateComment).toHaveBeenCalled();
+    const updateCall = mockUpdateComment.mock.calls[0] as unknown[] | undefined;
+    expect(updateCall).toBeDefined();
+    const updateArgs = updateCall![0] as {
+      comment_id: number;
+      body: string;
+    };
+    // Must update the *most recent* bot comment (id 88), not the oldest (id 42).
+    expect(updateArgs.comment_id).toBe(88);
+  });
+
+  test('falls back to createComment when updateComment fails', async () => {
+    // When issues.updateComment throws (e.g. transient 5xx), createFinalComment
+    // should fall through to createComment so the comment is not lost entirely.
+    const mockListComments = vi.fn(() =>
+      Promise.resolve({
+        data: [
+          {
+            id: 88,
+            body: '<!-- pi-coding-agent-comment -->\nold bot response',
+            user: { type: 'Bot', login: 'pi-coding-agent[bot]' },
+          },
+        ],
+        headers: {},
+        status: 200,
+        url: '',
+      })
+    );
+    const mockUpdateComment = vi.fn(() => Promise.reject(new Error('500 Server Error')));
+    const mockCreateComment = vi.fn(() =>
+      Promise.resolve({ data: { id: 999 }, headers: {}, status: 201, url: '' })
+    );
+
+    const deps = {
+      ...createTestDeps(),
+      updateComment: true,
+      logger: { ...createTestDeps().logger, warning: vi.fn() },
+      octokit: {
+        rest: {
+          issues: {
+            createComment: mockCreateComment,
+            listComments: mockListComments,
+            updateComment: mockUpdateComment,
+          },
+          pulls: { createReplyForReviewComment: vi.fn() },
+        },
+      } as any,
+    };
+
+    await createFinalComment(deps, 'New response', {});
+
+    // Update should have been attempted ...
+    expect(mockUpdateComment).toHaveBeenCalled();
+    // ... and create should have been called as fallback.
+    expect(mockCreateComment).toHaveBeenCalled();
+  });
+
+  test('does NOT pass sort/direction to listComments (unsupported, silently ignored)', async () => {
+    // Verifies we do NOT send `sort`/`direction` to issues.listComments —
+    // GitHub silently ignores those params and the endpoint always returns
+    // comments in ascending-ID order (oldest first). We instead select the
+    // highest-id match as the most recent bot comment.
+    const mockListComments = vi.fn(() =>
+      Promise.resolve({
+        data: [],
+        headers: {},
+        status: 200,
+        url: '',
+      })
+    );
+
+    const deps = {
+      ...createTestDeps(),
+      updateComment: true,
+      octokit: {
+        rest: {
+          issues: {
+            createComment: vi.fn(),
+            listComments: mockListComments,
+            updateComment: vi.fn(),
+          },
+          pulls: {
+            createReplyForReviewComment: vi.fn(),
+          },
+        },
+      } as any,
+    };
+
+    await createFinalComment(deps, 'New response', {});
+
+    expect(mockListComments).toHaveBeenCalledWith(
+      expect.objectContaining({
+        per_page: 100,
+        page: 1,
+      })
+    );
+    // sort and direction should NOT be present — GitHub ignores them.
+    const calls = mockListComments.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    const callArgs = (calls[0] as unknown as [Record<string, unknown>])[0];
+    expect(callArgs).not.toHaveProperty('sort');
+    expect(callArgs).not.toHaveProperty('direction');
+  });
+
+  test('passes sort=created and direction=desc to listReviewComments (review comments support these params)', async () => {
+    // Unlike issues.listComments, pulls.listReviewComments DOES support
+    // sort/direction. We pass `sort: 'created', direction: 'desc'` so the API
+    // returns review comments newest-first, and we select the first bot-authored
+    // match (highest id in this thread) as the most recent prior reply.
+    const mockListReviewComments = vi.fn(() =>
+      Promise.resolve({
+        data: [],
+        headers: {},
+        status: 200,
+        url: '',
+      })
+    );
+
+    const deps = {
+      ...createTestDeps({
+        comment: {
+          id: 789,
+          body: 'inline comment on code',
+          pull_request_review_id: 456,
+        },
+      }),
+      updateComment: true,
+      octokit: {
+        rest: {
+          issues: { createComment: vi.fn(), listComments: vi.fn(), updateComment: vi.fn() },
+          pulls: {
+            createReplyForReviewComment: vi.fn(),
+            listReviewComments: mockListReviewComments,
+            updateReviewComment: vi.fn(),
+          },
+        },
+      } as any,
+    };
+
+    await createFinalComment(deps, 'Updated review reply', {});
+
+    expect(mockListReviewComments).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sort: 'created',
+        direction: 'desc',
+        pull_number: 123,
+        owner: 'test-owner',
+        repo: 'test-repo',
+      })
+    );
   });
 });

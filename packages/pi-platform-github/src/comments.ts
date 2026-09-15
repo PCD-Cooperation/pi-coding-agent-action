@@ -289,6 +289,299 @@ export function formatNumber(value: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// Comment finding + update (optional overwrite behaviour)
+// ---------------------------------------------------------------------------
+
+/** Marker for the bot's own top-level issue/PR comments. */
+const BOT_COMMENT_MARKER = '<!-- pi-coding-agent-comment -->';
+
+/**
+ * Maximum number of list-comments pages to fetch when searching for a prior bot
+ * comment. Each page returns up to MAX_COMMENTS_PER_PAGE entries.
+ *
+ * We cap pagination to avoid unbounded API cost on PRs with an extraordinarily
+ * long comment thread. In practice the bot's marker is unique enough that the
+ * relevant comment is almost always on the first page; this safety bound simply
+ * prevents older markers from being invisible in pathological cases while still
+ * being correct for any realistic CI thread.
+ */
+const MAX_COMMENT_PAGES = 5;
+
+/**
+ * Number of comments to request per page from the list-comments endpoints.
+ * 100 is the GitHub API maximum and minimises the number of page requests.
+ */
+const MAX_COMMENTS_PER_PAGE = 100;
+
+/**
+ * Marker used for replies to PR review comments (inline review comments).
+ *
+ * Top-level issue/PR comments and PR review-comment replies live in separate
+ * GitHub comment namespaces (issue comments vs. review comments) and are
+ * fetched/updated through different REST endpoints, so they need distinct
+ * markers. This marker lets us identify -- and overwrite on re-runs -- the
+ * bot's previous reply to an inline review comment instead of creating a
+ * duplicate reply every time `/pi` is re-invoked on the same comment.
+ */
+const BOT_REVIEW_COMMENT_MARKER = '<!-- pi-coding-agent-review-comment -->';
+
+/** A minimal projection of a GitHub issue/PR comment. */
+export interface CommentRef {
+  id: number;
+  body: string;
+}
+
+interface CommentWithUser {
+  id: number;
+  body?: string | null;
+  user?: {
+    type?: string | null;
+    login?: string | null;
+  } | null;
+}
+
+/**
+ * Recognise a comment as authored by this action, regardless of which
+ * namespace (issue comment vs. PR review-comment reply) it lives in.
+ *
+ * Both {@link BOT_COMMENT_MARKER} and {@link BOT_REVIEW_COMMENT_MARKER} are
+ * accepted so that review replies authored *before* the dedicated review
+ * marker existed (still tagged with the issue marker) are recognised on the
+ * next run and migrated onto the correct marker instead of spawning a
+ * duplicate reply.
+ *
+ * Also verifies that the comment author is a Bot user (`user.type === 'Bot'`).
+ */
+function isBotAuthored(comment: CommentWithUser): boolean {
+  const body = comment.body;
+  if (!body) {
+    return false;
+  }
+  if (comment.user?.type !== 'Bot') {
+    return false;
+  }
+  return body.startsWith(BOT_COMMENT_MARKER) || body.startsWith(BOT_REVIEW_COMMENT_MARKER);
+}
+
+/**
+ * Fetch all issue/PR comments across multiple pages.
+ *
+ * GitHub's `listComments` endpoint returns comments sorted by **ascending ID**
+ * (oldest first) by default and does not support `sort`/`direction` params —
+ * those are silently dropped. We paginate up to {@link MAX_COMMENT_PAGES}
+ * pages to avoid silently dropping older bot comments on PRs with 100+ total
+ * comments (the API returns at most MAX_COMMENTS_PER_PAGE results per page).
+ *
+ * The returned array is ordered oldest-first (the endpoint's native order);
+ * callers must select the highest-id match to find the most recent prior bot
+ * comment.
+ *
+ * @returns Array of comment objects, oldest-first.
+ */
+async function listAllIssueComments(
+  deps: GitHubModuleDeps,
+  owner: string,
+  repo: string,
+  issueNumber: number
+): Promise<RestEndpointMethodTypes['issues']['listComments']['response']['data']> {
+  const allComments: NonNullable<
+    RestEndpointMethodTypes['issues']['listComments']['response']['data']
+  > = [];
+  let page = 1;
+  while (page <= MAX_COMMENT_PAGES) {
+    const comments = await deps.octokit.rest.issues.listComments({
+      owner,
+      repo,
+      issue_number: issueNumber,
+      per_page: MAX_COMMENTS_PER_PAGE,
+      page,
+    });
+    allComments.push(...comments.data);
+    if (comments.data.length < MAX_COMMENTS_PER_PAGE) {
+      break;
+    }
+    page++;
+  }
+  return allComments;
+}
+
+/**
+ * Fetch all PR review comments (top-level inline comments + their replies)
+ * across multiple pages, newest-first.
+ *
+ * Same pagination + ordering rationale as {@link listAllIssueComments}: GitHub
+ * defaults to ascending ID order (oldest first), so we request
+ * `sort: 'created', direction: 'desc'` and walk up to
+ * {@link MAX_COMMENT_PAGES} pages.
+ *
+ * @returns Array of review-comment objects, newest-first.
+ */
+async function listAllReviewComments(
+  deps: GitHubModuleDeps,
+  owner: string,
+  repo: string,
+  issueNumber: number
+): Promise<RestEndpointMethodTypes['pulls']['listReviewComments']['response']['data']> {
+  const allComments: NonNullable<
+    RestEndpointMethodTypes['pulls']['listReviewComments']['response']['data']
+  > = [];
+  let page = 1;
+  while (page <= MAX_COMMENT_PAGES) {
+    const reviewComments = await deps.octokit.rest.pulls.listReviewComments({
+      owner,
+      repo,
+      pull_number: issueNumber,
+      per_page: MAX_COMMENTS_PER_PAGE,
+      sort: 'created',
+      direction: 'desc',
+      page,
+    });
+    allComments.push(...reviewComments.data);
+    if (reviewComments.data.length < MAX_COMMENTS_PER_PAGE) {
+      break;
+    }
+    page++;
+  }
+  return allComments;
+}
+
+/**
+ * Find the most recent comment authored by this action on the current issue/PR.
+ *
+ * We identify our own comments by embedding one of the bot markers
+ * ({@link BOT_COMMENT_MARKER} for issue/PR comments or
+ * {@link BOT_REVIEW_COMMENT_MARKER} for PR review-comment replies) at the
+ * start of the body — this is resilient to footer changes and avoids matching
+ * unrelated bot comments in this (issue-comment) namespace.
+ *
+ * GitHub's `listComments` endpoint returns comments sorted by **ascending ID**
+ * (oldest first) by default and does not support `sort`/`direction` params.
+ * We therefore cannot request descending order; instead we collect every
+ * bot-authored match and pick the highest-id one, which is the most recent.
+ *
+ * @returns The most recent matching comment (or `undefined` if none found).
+ */
+export async function findPreviousBotComment(
+  deps: GitHubModuleDeps
+): Promise<CommentRef | undefined> {
+  const issueNumber = deps.context.issue.number;
+  if (!issueNumber) {
+    return undefined;
+  }
+
+  const { owner, repo } = deps.context.repo;
+  const allComments = await listAllIssueComments(deps, owner, repo, issueNumber);
+
+  // Collect all bot-authored matches (oldest-first in this endpoint) and pick
+  // the highest id = most recent prior bot comment.
+  const matches = allComments.filter(c => isBotAuthored(c));
+  if (matches.length === 0) {
+    return undefined;
+  }
+  // matches is guaranteed non-empty here.
+  const found = matches.reduce((max, c) => (c.id > max.id ? c : max), matches[0]!);
+  return { id: found.id, body: found.body ?? '' };
+}
+
+/**
+ * Update an existing comment authored by this action, identified by `commentId`.
+ *
+ * @param commentId - The GitHub comment id to update.
+ * @returns The Octokit response, or `undefined` if `body` is empty.
+ */
+export async function updateBotComment(
+  deps: GitHubModuleDeps,
+  commentId: number,
+  body: string
+): Promise<RestEndpointMethodTypes['issues']['updateComment']['response'] | undefined> {
+  if (!body) {
+    return;
+  }
+
+  const { owner, repo } = deps.context.repo;
+  return deps.octokit.rest.issues.updateComment({
+    owner,
+    repo,
+    comment_id: commentId,
+    body,
+  });
+}
+
+/**
+ * Find the most recent reply authored by this action to the inline review
+ * comment that triggered the current run.
+ *
+ * PR review-comment replies live in a separate namespace from issue/PR
+ * comments: they're fetched via `pulls.listReviewComments` (not
+ * `issues.listComments`), and replies are identified by an `in_reply_to_id`
+ * that points at the parent (top-level) review comment. We therefore look for
+ * the bot's previous reply whose `in_reply_to_id` matches the id of the
+ * comment we're replying to, and whose body is prefixed with a bot marker —
+ * {@link BOT_REVIEW_COMMENT_MARKER}, or — for backward compatibility —
+ * {@link BOT_COMMENT_MARKER} on replies authored before the review marker existed.
+ *
+ * GitHub's `listReviewComments` endpoint, like `listComments`, defaults to
+ * ascending ID order (oldest first). We request `direction: 'desc'` via
+ * {@link listAllReviewComments} so the first match is the most recent prior reply.
+ *
+ * @returns The most recent matching reply (or `undefined` if none found).
+ */
+export async function findPreviousBotReviewComment(
+  deps: GitHubModuleDeps
+): Promise<CommentRef | undefined> {
+  const issueNumber = deps.context.issue.number;
+  if (!issueNumber) {
+    return undefined;
+  }
+
+  // We only ever reply to a specific inline review comment; if there isn't
+  // one in the payload, there's nothing to match against.
+  const commentId = (deps.context.payload.comment as { id?: number } | undefined)?.id;
+  if (commentId === undefined) {
+    return undefined;
+  }
+
+  const { owner, repo } = deps.context.repo;
+  const allReviewComments = await listAllReviewComments(deps, owner, repo, issueNumber);
+
+  // Newest-first: the first match is the most recent prior reply in this thread.
+  const found = allReviewComments.find(c => c.in_reply_to_id === commentId && isBotAuthored(c));
+  if (!found) {
+    return undefined;
+  }
+  return { id: found.id, body: found.body ?? '' };
+}
+
+/**
+ * Update an existing reply authored by this action to a PR review comment,
+ * identified by `commentId` (the reply's own review-comment id).
+ *
+ * Uses `pulls.updateReviewComment` (PATCH on `/repos/{owner}/{repo}/pulls/comments/{comment_id}`),
+ * which updates the body of any review comment — including replies to a
+ * top-level review comment — identified by that comment's own id.
+ *
+ * @param commentId - The review-comment id of the reply to update.
+ * @returns The Octokit response, or `undefined` if `body` is empty.
+ */
+export async function updateBotReviewComment(
+  deps: GitHubModuleDeps,
+  commentId: number,
+  body: string
+): Promise<RestEndpointMethodTypes['pulls']['updateReviewComment']['response'] | undefined> {
+  if (!body) {
+    return;
+  }
+
+  const { owner, repo } = deps.context.repo;
+  return deps.octokit.rest.pulls.updateReviewComment({
+    owner,
+    repo,
+    comment_id: commentId,
+    body,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -298,10 +591,31 @@ export function formatNumber(value: number): string {
  * Automatically appends a "View action run" link pointing to the GitHub Actions
  * run that produced the comment, along with optional Pi metadata.
  *
+ * When `deps.updateComment` is true, the function first attempts to find and
+ * update the bot's previous comment so it doesn't leave a duplicate behind on
+ * re-runs. The lookup is namespace-aware because GitHub stores the two kinds
+ * of comments in separate endpoints:
+ *
+ * - For top-level issue/PR comments it searches `issues.listComments` for a
+ *   comment prefixed with {@link BOT_COMMENT_MARKER} and updates it via
+ *   `issues.updateComment`.
+ * - For replies to inline PR review comments it searches
+ *   `pulls.listReviewComments` for a reply (with an `in_reply_to_id` matching
+ *   the comment we're replying to) prefixed with
+ *   {@link BOT_REVIEW_COMMENT_MARKER} and updates it via
+ *   `pulls.updateReviewComment`. (Older replies authored before the review
+ *   marker existed — still tagged with {@link BOT_COMMENT_MARKER} — are also
+ *   recognised here so the upgrade transition leaves no duplicates behind.)
+ *
+ * If no prior comment is found, or when `updateComment` is false, it creates a
+ * new comment (or review-comment reply) with the appropriate marker embedded
+ * in the body so a future run can find + overwrite it.
+ *
  * @param deps - Module dependencies.
  * @param body - The Markdown body of the comment.
  * @param metadata - Optional metadata to include in the footer.
- * @returns The Octokit response, or `undefined` if `body` is empty.
+ * @returns The Octokit response, or `undefined` if `body` is empty or the
+ *   context has no issue/PR number.
  */
 export async function createFinalComment(
   deps: GitHubModuleDeps,
@@ -315,5 +629,49 @@ export async function createFinalComment(
   const footer = buildMetadataFooter(deps, metadata);
   const finalBody = footer ? `${body}\n\n---\n\n${footer}` : body;
 
-  return createComment(deps, finalBody);
+  // Pick the marker (and matching update strategy) for the comment namespace
+  // we're operating in: review-comment replies vs. top-level issue/PR comments.
+  const isReviewComment = isPullRequestReviewComment(deps);
+  const marker = isReviewComment ? BOT_REVIEW_COMMENT_MARKER : BOT_COMMENT_MARKER;
+
+  // Optionally overwrite the bot's previous comment instead of creating a new one.
+  if (deps.updateComment) {
+    if (isReviewComment) {
+      const prev = await findPreviousBotReviewComment(deps);
+      if (prev) {
+        deps.logger.debug(`[comments] updating previous bot review comment ${prev.id}`);
+        const updatedBody = `${marker}\n${finalBody}`;
+        try {
+          await updateBotReviewComment(deps, prev.id, updatedBody);
+          return;
+        } catch (err) {
+          // If the update fails (e.g. transient 5xx, permissions issue),
+          // fall through to createComment so the comment is not lost entirely.
+          deps.logger.warning(
+            `[comments] failed to update bot review comment ${prev.id}, falling back to create: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      }
+    } else {
+      const prev = await findPreviousBotComment(deps);
+      if (prev) {
+        deps.logger.debug(`[comments] updating previous bot comment ${prev.id}`);
+        const updatedBody = `${marker}\n${finalBody}`;
+        try {
+          await updateBotComment(deps, prev.id, updatedBody);
+          return;
+        } catch (err) {
+          // If the update fails (e.g. transient 5xx, permissions issue),
+          // fall through to createComment so the comment is not lost entirely.
+          deps.logger.warning(
+            `[comments] failed to update bot comment ${prev.id}, falling back to create: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      }
+    }
+  }
+
+  // Embed the marker so subsequent runs can find + overwrite this comment.
+  const markedBody = `${marker}\n${finalBody}`;
+  return createComment(deps, markedBody);
 }

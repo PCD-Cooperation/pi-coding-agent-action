@@ -70,7 +70,10 @@ export {
   createOpengistGist,
   opengistGistProvider,
   DEFAULT_OPENGIST_API_PATH,
+  DEFAULT_OPENGIST_EXPIRATION,
+  OPENGIST_EXPIRATIONS,
 } from './share/opengist';
+export type { OpengistExpiration } from './share/opengist';
 export { resolveGistProvider, resolveShareToken } from './share/provider';
 export type { ShareProviderConfig } from './share/provider';
 

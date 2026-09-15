@@ -67,6 +67,17 @@ describe('createOpengistGist', () => {
     expect(body.title).toBe('Pi agent session');
     // The files map shape matches GitHub's ({ name: { content } }).
     expect(body.files['session.html'].content).toBe('<html>session</html>');
+    // Default time-to-live: 7 days (the server converts this preset into an
+    // absolute expires_at and purges the gist afterwards).
+    expect(body.expire).toBe('7days');
+  });
+
+  test('honours an explicit expire preset (and never)', async () => {
+    await createOpengistGist({ token: 'og_token', content: 'x', apiUrl, expire: '1day' });
+    expect(JSON.parse((globalThis.fetch as any).mock.calls[0][1].body).expire).toBe('1day');
+
+    await createOpengistGist({ token: 'og_token', content: 'x', apiUrl, expire: 'never' });
+    expect(JSON.parse((globalThis.fetch as any).mock.calls[1][1].body).expire).toBe('never');
   });
 
   test('maps the public flag to the visibility enum', async () => {

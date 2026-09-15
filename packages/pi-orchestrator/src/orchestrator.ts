@@ -451,6 +451,7 @@ export class ActionOrchestrator {
         content,
         description,
         ...(this.config.shareGistApiUrl ? { apiUrl: this.config.shareGistApiUrl } : {}),
+        ...(this.config.shareGistExpiration ? { expire: this.config.shareGistExpiration } : {}),
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

@@ -206,7 +206,7 @@ export interface CreateReviewParams {
   body?: string;
   /** Review event: COMMENT (default), APPROVE, or REQUEST_CHANGES. */
   event?: 'COMMENT' | 'APPROVE' | 'REQUEST_CHANGES';
-  /** Inline comments anchored to specific diff lines. At least one is required. */
+  /** Inline comments anchored to specific diff lines. May be empty when body is non-empty. */
   comments: ReviewInlineComment[];
 }
 
@@ -373,6 +373,9 @@ export interface PlatformProvider {
 
   /**
    * Create the final comment with optional metadata footer.
+   *
+   * When `updateComment` is true, implementations should update/overwrite
+   * the bot's previous comment (if any) rather than creating a new one.
    *
    * @param body - The comment body.
    * @param metadata - Optional metadata to include in the footer.

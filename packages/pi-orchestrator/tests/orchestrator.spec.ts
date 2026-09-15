@@ -307,6 +307,19 @@ describe('ActionOrchestrator', () => {
       );
     });
 
+    test('logs non-Error session disposal failures', async () => {
+      (mockPiAgent.dispose as any).mockImplementation(() => {
+        throw 'close failed';
+      });
+
+      const orchestrator = createOrchestrator();
+      await expect(orchestrator.execute()).resolves.toBeUndefined();
+
+      expect(mockCore.notice).toHaveBeenCalledWith(
+        'failed to dispose Pi agent session: close failed'
+      );
+    });
+
     test('logs agent session completed banner after successful run', async () => {
       const orchestrator = createOrchestrator();
       await orchestrator.execute();
@@ -1739,6 +1752,8 @@ describe('ActionOrchestrator', () => {
       const body = JSON.parse(init.body);
       expect(body.visibility).toBe('unlisted');
       expect(body.title).toBe('Pi session — test-owner/test-repo#1 (run 123)');
+      // Default TTL is 7 days (shareGistExpiration unset).
+      expect(body.expire).toBe('7days');
       expect(init.headers.Authorization).toBe('Bearer og_opengist-token');
 
       // Outputs carry the raw-HTML link (renders standalone), not pi.dev.
@@ -1755,6 +1770,30 @@ describe('ActionOrchestrator', () => {
       expect(mockCore.info).toHaveBeenCalledWith(
         '🔗 Session shared: https://gist.l3x.in/bot/my-session/raw/HEAD/session.html'
       );
+    });
+
+    test('forwards shareGistExpiration to the Opengist create request', async () => {
+      globalThis.fetch = vi.fn(async () => ({
+        ok: true,
+        status: 201,
+        json: async () => ({
+          id: 'og-uuid-123',
+          html_url: 'https://gist.l3x.in/bot/my-session',
+        }),
+        text: async () => '',
+      })) as unknown as typeof fetch;
+
+      const orchestrator = createOrchestrator({
+        shareSession: true,
+        shareGistProvider: 'opengist',
+        shareGistApiUrl: 'https://gist.l3x.in/api/gists',
+        shareGistToken: 'og_opengist-token',
+        shareGistExpiration: 'never',
+      });
+      await orchestrator.execute();
+
+      const body = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
+      expect(body.expire).toBe('never');
     });
 
     test('Opengist share_url uses a custom viewer link when PI_SHARE_VIEWER_URL is set', async () => {

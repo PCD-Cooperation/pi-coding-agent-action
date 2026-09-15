@@ -51,7 +51,42 @@ import {
 export const DEFAULT_OPENGIST_API_PATH = '/api/gists';
 
 /**
+ * Fixed-duration gist expiration presets supported by Opengist's create API
+ * (`expire` field). Mirrors `db.ExpirationType` in the server
+ * (`internal/db/gist_expiration.go`); `custom` is intentionally omitted since
+ * we only offer the presets (a custom absolute date would need a UI to pick
+ * it).
+ */
+export type OpengistExpiration = 'never' | '1hour' | '12hours' | '1day' | '7days' | '15days';
+
+/**
+ * All valid {@link OpengistExpiration} values, in ascending duration order.
+ * Exported so frontends (e.g. the Action config adapter) can validate user
+ * input against the same list the provider accepts.
+ */
+export const OPENGIST_EXPIRATIONS: readonly OpengistExpiration[] = [
+  'never',
+  '1hour',
+  '12hours',
+  '1day',
+  '7days',
+  '15days',
+];
+
+/**
+ * Default gist time-to-live applied by the Opengist provider: 7 days.
+ *
+ * Shared sessions are ephemeral CI artifacts, so we expire them unless the
+ * operator opts into a different TTL (or `never`). GitHub Gists have no TTL,
+ * so this only affects the Opengist backend.
+ */
+export const DEFAULT_OPENGIST_EXPIRATION: OpengistExpiration = '7days';
+
+/**
  * Create a gist on an Opengist instance and return a self-rendering share link.
+ *
+ * The gist expires after {@link DEFAULT_OPENGIST_EXPIRATION} (7 days) unless
+ * `input.expire` overrides it; pass `'never'` to disable expiry.
  *
  * @param input - Gist creation parameters. `apiUrl` **must** be set to the
  *   instance's create endpoint (e.g. `https://gist.l3x.in/api/gists`); there is
@@ -67,6 +102,7 @@ export async function createOpengistGist(input: CreateGistInput): Promise<Create
     description = 'Pi agent session',
     public: isPublic = false,
     apiUrl,
+    expire = DEFAULT_OPENGIST_EXPIRATION,
   } = input;
 
   if (!apiUrl) {
@@ -96,6 +132,11 @@ export async function createOpengistGist(input: CreateGistInput): Promise<Create
       body: JSON.stringify({
         title: description,
         visibility,
+        // Opengist time-to-live (TTL): the server turns this preset into an
+        // absolute `expires_at` timestamp and purges the gist afterwards.
+        // Defaults to 7 days — shared sessions are ephemeral CI artifacts.
+        // `never` opts out of expiry.
+        expire,
         files: { [filename]: { content } },
       }),
     },

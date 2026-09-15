@@ -7,28 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.27.1] - 2026-07-30
+## [2.28.1] - 2026-09-15
+
+### Changed
+
+- **deps-ci**: bump github/codeql-action from 4.37.9 to 4.38.0 (#412)
+- **deps-dev**: bump vitest from 4.1.10 to 4.1.11 (#410)
 
 ### Fixed
 
-- bundle OAuth flows for standalone action
+- **opengist**: add default TTL for opengist uploads
 
-## [2.27.0] - 2026-07-30
+## [2.28.0] - 2026-09-08
 
 ### Added
 
+- add update_comment input for opt-in bot comment overwrite (#403)
+
+### Changed
+
+- **deps-ci**: bump github/codeql-action from 4.37.7 to 4.37.9 (#407)
+- **deps**: bump Pi sdk to v0.85.1
+
+## [2.27.1] - 2026-08-26
+
+### Changed
+
+- **deps-ci**: bump github/codeql-action from 4.37.3 to 4.37.6 (#402)
+- **deps-ci**: bump github/codeql-action from 4.37.6 to 4.37.7 (#406)
+
+### Fixed
+
+- bump Pi SDK to v0.84.3
+- **deps**: bump Pi to v0.84.0 (#400)
+- **pi-action**: bundle AWS Bedrock provider into dist to fix missing module error (#398) (#399)
+- load npm extensions from bundled Pi runtime (#405)
+- **github**: recover missing PR context from event payload (#401)
+
+## [2.27.0] - 2026-08-03
+
+### Added
+
+- dispose Pi sessions after orchestration (#394)
 - migrate from Bun to Node + Vitest + pnpm (#392)
 - opt tools into strict sampling, bump Pi to v0.82.1 (#393)
 
 ### Changed
 
 - **deps-ci**: bump actions/setup-node from 6 to 7 (#389)
+- **deps-ci**: bump github/codeql-action from 4 to 4.37.3 (#395)
 - **deps**: update dependencies, Pi to v0.80.10 (#388)
 - **deps**: update dependencies, Pi to v0.81.1 (#390)
 
 ### Fixed
 
-- dispose Pi sessions after orchestration
+- **release**: resolve tsx not found in semantic-release prepareCmd (#397)
 
 ## [2.26.0] - 2026-07-16
 
@@ -640,9 +673,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README link corrections
 - Codecov action updated, removed double build
 
-[unreleased]: https://github.com/PCD-Cooperation/pi-coding-agent-action/compare/v2.27.1...HEAD
-[2.27.1]: https://github.com/PCD-Cooperation/pi-coding-agent-action/compare/v2.27.0...v2.27.1
-[2.27.0]: https://github.com/PCD-Cooperation/pi-coding-agent-action/compare/v2.26.0...v2.27.0
+[unreleased]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.28.1...HEAD
+[2.28.1]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.28.0...v2.28.1
+[2.28.0]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.27.1...v2.28.0
+[2.27.1]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.27.0...v2.27.1
+[2.27.0]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.26.0...v2.27.0
 [2.26.0]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.25.1...v2.26.0
 [2.25.1]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.25.0...v2.25.1
 [2.25.0]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.24.0...v2.25.0

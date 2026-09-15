@@ -20,7 +20,7 @@ import { coreMock } from '../../../pi-orchestrator/tests/helpers/core-mock';
 // object — same object registerCoreMock() uses, so order doesn't matter.
 vi.mock('@actions/core', () => coreMock);
 
-import { gatherActionsConfig } from '../../src/adapters/config';
+import { gatherActionsConfig, parseGistExpiration } from '../../src/adapters/config';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -293,6 +293,41 @@ describe('gatherActionsConfig', () => {
       const config = gatherActionsConfig();
       expect(config.shareGistToken).toBe('og_secret');
       expect(coreMock.setSecret).toHaveBeenCalledWith('og_secret');
+    });
+
+    test('share_gist_expiration defaults to undefined (provider applies 7days)', () => {
+      expect(gatherActionsConfig().shareGistExpiration).toBeUndefined();
+    });
+
+    test('parses share_gist_expiration (case-insensitive, trimmed)', () => {
+      mockCore({ share_gist_expiration: '  1DAY ' });
+      expect(gatherActionsConfig().shareGistExpiration).toBe('1day');
+    });
+
+    test('accepts the never preset', () => {
+      mockCore({ share_gist_expiration: 'never' });
+      expect(gatherActionsConfig().shareGistExpiration).toBe('never');
+    });
+
+    test('drops an unknown share_gist_expiration and warns', () => {
+      mockCore({ share_gist_expiration: '2weeks' });
+      expect(gatherActionsConfig().shareGistExpiration).toBeUndefined();
+      expect(coreMock.warning).toHaveBeenCalledWith(
+        expect.stringMatching(/Unknown share_gist_expiration "2weeks".*7days/)
+      );
+    });
+
+    test('does not warn for a recognised share_gist_expiration', () => {
+      mockCore({ share_gist_expiration: '15days' });
+      gatherActionsConfig();
+      expect(coreMock.warning).not.toHaveBeenCalled();
+    });
+
+    test('parseGistExpiration returns undefined for empty/unknown input', () => {
+      expect(parseGistExpiration('')).toBeUndefined();
+      expect(parseGistExpiration('   ')).toBeUndefined();
+      expect(parseGistExpiration('nope')).toBeUndefined();
+      expect(parseGistExpiration('7days')).toBe('7days');
     });
   });
 });

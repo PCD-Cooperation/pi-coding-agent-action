@@ -195,6 +195,13 @@ export interface CreateGistInput {
    * Defaults to {@link DEFAULT_GITHUB_GIST_API}.
    */
   apiUrl?: string;
+  /**
+   * Opengist-only: gist time-to-live preset (server-side expiry). One of
+   * `never`, `1hour`, `12hours`, `1day`, `7days`, `15days`. The Opengist
+   * provider defaults this to `7days` when unset; GitHub Gists have no
+   * equivalent, so {@link createSessionGist} ignores it.
+   */
+  expire?: string;
 }
 
 /** Result of a successful gist creation. */

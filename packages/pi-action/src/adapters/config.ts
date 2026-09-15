@@ -18,7 +18,11 @@
  */
 
 import * as core from '@actions/core';
-import type { PiConfig } from '@alexanderfortin/pi-orchestrator';
+import type { OpengistExpiration, PiConfig } from '@alexanderfortin/pi-orchestrator';
+import {
+  DEFAULT_OPENGIST_EXPIRATION,
+  OPENGIST_EXPIRATIONS,
+} from '@alexanderfortin/pi-orchestrator';
 
 // ---------------------------------------------------------------------------
 // Error message constants — keep stable; they are part of the public
@@ -104,6 +108,21 @@ export function parseLoadedTools(input: string): string[] | undefined {
     .map(t => t.trim())
     .filter(Boolean);
   return tools.length > 0 ? [...new Set(tools)] : undefined;
+}
+
+/**
+ * Parse the `share_gist_expiration` input into an Opengist TTL preset.
+ *
+ * Returns `undefined` for empty input (the provider then applies its 7-day
+ * default) and for unrecognised values (a warning is emitted by the caller so
+ * a typo doesn't silently change the TTL). Matching is case-insensitive and
+ * whitespace-trimmed.
+ */
+export function parseGistExpiration(raw: string): OpengistExpiration | undefined {
+  const normalized = raw.trim().toLowerCase();
+  return (OPENGIST_EXPIRATIONS as readonly string[]).includes(normalized)
+    ? (normalized as OpengistExpiration)
+    : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +211,18 @@ export function gatherActionsConfig(): PiConfig {
   if (shareGistToken) {
     core.setSecret(shareGistToken);
   }
+  // TTL preset for shared Opengist gists. Unset → undefined so the provider's
+  // 7-day default applies; an unrecognised value warns and also falls back to
+  // that default rather than sending a value the server would reject.
+  const shareGistExpirationRaw = core.getInput('share_gist_expiration');
+  const shareGistExpiration = parseGistExpiration(shareGistExpirationRaw);
+  if (shareGistExpirationRaw.trim() && !shareGistExpiration) {
+    core.warning(
+      `Unknown share_gist_expiration "${shareGistExpirationRaw.trim()}"; ` +
+        `defaulting to ${DEFAULT_OPENGIST_EXPIRATION}. ` +
+        `Valid values are: ${OPENGIST_EXPIRATIONS.join(', ')}.`
+    );
+  }
 
   // --- Optional positive-integer inputs ----------------------------------
   const diffMaxLines = parsePositiveIntInput(core.getInput('diff_max_lines'));
@@ -224,6 +255,7 @@ export function gatherActionsConfig(): PiConfig {
     ...(shareGistProvider ? { shareGistProvider } : {}),
     ...(shareGistApiUrl ? { shareGistApiUrl } : {}),
     ...(shareGistToken ? { shareGistToken } : {}),
+    ...(shareGistExpiration ? { shareGistExpiration } : {}),
     ...(githubToken ? { githubToken } : {}),
     ...(diffMaxLines ? { diffMaxLines } : {}),
     ...(diffMaxBytes ? { diffMaxBytes } : {}),

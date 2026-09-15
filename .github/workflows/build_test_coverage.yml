@@ -43,6 +43,7 @@ jobs:
         run: pnpm run test:coverage
 
       - name: Upload coverage to Codecov
+        if: github.repository_owner == 'shaftoe'
         uses: codecov/codecov-action@v7
         with:
           files: ./coverage/lcov.info
@@ -54,9 +55,9 @@ jobs:
         if: inputs.e2e == true
         run: pnpm run test:e2e
         env:
-          E2E_PROVIDER: ${{ vars.PROVIDER }}
-          E2E_MODEL: ${{ vars.MODEL_LIGHT }}
-          E2E_TOKEN: ${{ secrets.token }}
+          E2E_PROVIDER: ${{ vars.PROVIDER_CUSTOM }}
+          E2E_MODEL: ${{ vars.MODEL_CUSTOM }}
+          E2E_TOKEN: ${{ secrets.token_custom }}
           E2E_MODEL_CUSTOM: ${{ vars.MODEL_CUSTOM }}
           E2E_PROVIDER_CUSTOM: ${{ vars.PROVIDER_CUSTOM }}
           E2E_TOKEN_CUSTOM: ${{ secrets.token_custom }}
