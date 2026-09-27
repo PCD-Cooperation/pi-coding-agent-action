@@ -65,7 +65,7 @@ The `develop` branch is in constant development while the `v2` branch is conside
 
 The action is bundled into a single `dist/index.js` via [esbuild](https://esbuild.github.io/) so no `node_modules` are needed at runtime. Non-code Pi SDK assets (HTML templates, theme JSON) are copied to `dist/pi-sdk/` and resolved via the `PI_PACKAGE_DIR` environment variable.
 
-Dependencies (including Pi itself) are [updated regularly](./.github/workflows/daily-deps-update.yml) to keep up with new releases.
+Dependencies (including Pi itself) are kept up to date via the [Renovate](https://github.com/apps/renovate) GitHub app.
 
 If you need to pin to a specific Pi SDK version check out previous release tags and refer to the following table to find the correct version:
 
