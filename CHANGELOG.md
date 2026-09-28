@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.29.1] - 2026-09-28
+
+### Changed
+
+- **deps**: bump Pi to v0.87.1
+
+### Fixed
+
+- add opt-out for model auto refresh
+- get_ci_status uses the current PR head by default (#417)
+- refresh model catalog from pi.dev at startup (#416)
+
 ## [2.29.0] - 2026-09-22
 
 ### Added
@@ -689,7 +701,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README link corrections
 - Codecov action updated, removed double build
 
-[unreleased]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.29.0...HEAD
+[unreleased]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.29.1...HEAD
+[2.29.1]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.29.0...v2.29.1
 [2.29.0]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.28.1...v2.29.0
 [2.28.1]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.28.0...v2.28.1
 [2.28.0]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.27.1...v2.28.0
