@@ -51,14 +51,14 @@ describe('SDK bundled extension loader patch', () => {
     const source = readFileSync(getLoaderPath(), 'utf-8');
     const patched = patchSDKLoaderSource(source);
 
-    expect(patched).toContain('{ virtualModules: VIRTUAL_MODULES, tryNative: false })');
-    expect(patched).not.toContain(': { alias: getAliases() }),');
+    expect(patched).toContain('const usesEmbeddedModules = true;');
+    expect(patched).toContain('virtualModules: await getVirtualModules(), tryNative: false');
   });
 
   test('fails when the SDK loader pattern changes', () => {
     const source = readFileSync(getLoaderPath(), 'utf-8').replace(
-      'alias: getAliases()',
-      'alias: changed()'
+      'const usesEmbeddedModules = isBunBinary || isNodeSeaBinary || isBundledNode;',
+      'const usesEmbeddedModules = changed();'
     );
 
     expect(() => patchSDKLoaderSource(source)).toThrow('loader pattern not matched');
