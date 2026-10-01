@@ -213,7 +213,13 @@ describe('get_pr_diff tool - execution', () => {
 
   test('execute uses context defaults when owner/repo/pull_number not provided', async () => {
     const { tool, getPRDiff } = buildTool();
-    await tool.execute('test-call', {}, undefined, undefined, mockCtx);
+    await tool.execute(
+      'test-call',
+      { owner: null, repo: null, pull_number: null, max_lines: null, ignore_files: null },
+      undefined,
+      undefined,
+      mockCtx
+    );
 
     expect(getPRDiff).toHaveBeenCalledTimes(1);
     // Should use context defaults: test-owner, test-repo, issue #42

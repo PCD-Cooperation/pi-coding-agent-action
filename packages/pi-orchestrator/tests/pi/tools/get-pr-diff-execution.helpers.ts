@@ -19,7 +19,7 @@ import {
   type DiffConfig,
   type PlatformProvider,
 } from '@alexanderfortin/pi-orchestrator';
-import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
+import type { ExtensionToolContext } from '@earendil-works/pi-coding-agent';
 import { createMockProvider, mockExtensionContext } from '../../helpers/tool-mocks';
 
 /** Event context shared by every test: PR #42 in `pull_request` event. */
@@ -48,7 +48,7 @@ export const BIG_DIFF_CONFIG: DiffConfig = { diffMaxBytes: 500 };
 export { createMockProvider };
 
 /** Re-exported mock context (typed as `ExtensionContext`) for `execute`. */
-export const mockCtx: ExtensionContext = mockExtensionContext;
+export const mockCtx: ExtensionToolContext = mockExtensionContext;
 
 export interface BuildToolOptions {
   /** Diff string the mocked `getPRDiff` will resolve to. Defaults to `SAMPLE_DIFF`. */
@@ -97,6 +97,8 @@ const DEFAULT_ARGS = Object.freeze({
   owner: 'test-owner',
   repo: 'test-repo',
   pull_number: 42,
+  max_lines: null,
+  ignore_files: null,
 });
 
 /**
