@@ -75,9 +75,9 @@ If you need to pin to a specific Pi SDK version check out previous release tags 
 |---|---|---|
 | `@actions/core` | `3.0.1` | GitHub Actions core I/O (inputs, outputs, logging) |
 | `@actions/github` | `9.1.1` | GitHub API client (Octokit wrapper) |
-| `@earendil-works/pi-agent-core` | `0.85.1` | Pi Agent Core — agent orchestration primitives |
-| `@earendil-works/pi-ai` | `0.85.1` | Pi AI — AI model abstractions and providers |
-| `@earendil-works/pi-coding-agent` | `0.85.1` | Pi SDK — AI coding agent runtime |
+| `@earendil-works/pi-agent-core` | `0.99.2` | Pi Agent Core — agent orchestration primitives |
+| `@earendil-works/pi-ai` | `0.99.2` | Pi AI — AI model abstractions and providers |
+| `@earendil-works/pi-coding-agent` | `0.99.2` | Pi SDK — AI coding agent runtime |
 | `@js-temporal/polyfill` | `0.5.1` | Temporal API polyfill |
 | `@octokit/core` | `7.0.6` | Octokit REST API client core |
 | `@octokit/plugin-rest-endpoint-methods` | `17.0.0` | Octokit REST API endpoint methods |
@@ -540,6 +540,22 @@ See the [Custom Provider documentation](https://github.com/badlogic/pi-mono/blob
 >
 > Refer to <https://pi.dev/docs/latest/custom-provider> for details.
 
+### GitHub Copilot with user OAuth
+
+Use a non-expiring GitHub user OAuth token obtained through the Copilot device flow. Store it in an Actions secret; an organization secret can be shared with selected repositories.
+
+```yaml
+- uses: PCD-Cooperation/pi-coding-agent-action@develop
+  with:
+    github_token: ${{ github.token }}
+    provider: github-copilot
+    model: gpt-6-luna
+    thinking_level: high
+    copilot_oauth_token: ${{ secrets.TALEBEE_COPILOT_OAUTH_TOKEN }}
+```
+
+Omit the `token` input. Pi exchanges the user OAuth token for a short-lived Copilot token and renews it before expiry. Credentials remain in memory and acquired access tokens are masked in action logs. No credential file or scheduled secret update is needed. Reauthorize and replace the secret if the user OAuth token is revoked or loses Copilot access. This input does not implement rotation for expiring GitHub user tokens.
+
 ### AWS Bedrock
 
 The `amazon-bedrock` provider runs models hosted on [AWS Bedrock](https://aws.amazon.com/bedrock/) (Anthropic Claude, Amazon Nova, Meta Llama, Mistral, and many others) through the Converse Stream API. Model IDs use Bedrock's native format (e.g. `anthropic.claude-sonnet-4-5-20250929-v1:0`, `amazon.nova-pro-v1:0`); see the [Pi providers list](https://pi.dev/docs/latest) for the full catalogue.
@@ -885,6 +901,7 @@ For complex, multi-step tasks that generate a lot of context (e.g. large code re
 | `server_url` | Override the forge server URL (e.g. `https://git.example.com`) when the runner-advertised `GITHUB_SERVER_URL` points at an internally-reachable host (e.g. `http://localhost:3000` on a Forgejo runner behind Docker). Affects user-facing links (commits, PRs, action runs) only — the API client keeps using the runner's `GITHUB_API_URL`, and platform selection is controlled by the `platform` input. | No | - |
 | `thinking_level` | Model thinking level | No | off |
 | `token` | Provider API token. Required for most providers, but can be omitted when using providers that support alternative auth mechanisms (e.g., `google-vertex` with Application Default Credentials) | No | - |
+| `copilot_oauth_token` | Non-expiring GitHub user OAuth token for `github-copilot`; Pi renews Copilot access tokens in memory. Omit `token`. | No | - |
 | `trigger` | Trigger phrase used to invoke the action | No | /pi  |
 | `update_comment` | Whether to update/overwrite the bot's previous comment on the issue/PR instead of creating a new one. Useful for reducing noise on incremental commits (e.g. auto-review on `pull_request: [opened, synchronize]`) | No | `false` |
 

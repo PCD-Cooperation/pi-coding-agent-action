@@ -171,6 +171,8 @@ export type PiAgentFactory = (
  * alternative frontends (web UI, GitHub App) can route to SSE/WebSocket.
  */
 export interface AgentEvents {
+  /** Register an acquired access token with the frontend's secret masking; never display it. */
+  onAuthToken?(token: string): void;
   /** Called for each thinking delta during agent execution. */
   onThinkingDelta?(delta: string): void;
   /** Called when a thinking segment ends. Frontends can use this to flush or
@@ -214,6 +216,8 @@ export interface PiConfig extends DiffConfig {
   provider: string;
   model: string;
   token: string;
+  /** Non-expiring GitHub user OAuth token; only valid with github-copilot and no API-key token. */
+  copilotOAuthToken?: string;
   thinkingLevel: string;
   promptInput: string;
   extensions?: string[];

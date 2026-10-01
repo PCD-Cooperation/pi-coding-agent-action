@@ -54,6 +54,19 @@ describe('gatherActionsConfig', () => {
     mockCore();
   });
 
+  test('reads and masks the dedicated Copilot OAuth input without an API-key token', () => {
+    mockCore({
+      provider: 'github-copilot',
+      model: 'gpt-6-luna',
+      token: '',
+      copilot_oauth_token: 'ghu_oauth-proof',
+    });
+    const config = gatherActionsConfig();
+    expect(config.copilotOAuthToken).toBe('ghu_oauth-proof');
+    expect(config.token).toBe('');
+    expect(coreMock.setSecret).toHaveBeenCalledWith('ghu_oauth-proof');
+  });
+
   describe('required fields validation', () => {
     test('throws descriptive error when provider is missing', () => {
       mockCore({ provider: '' });
