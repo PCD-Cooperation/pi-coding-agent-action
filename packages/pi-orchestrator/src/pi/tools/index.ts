@@ -32,6 +32,7 @@ import { createReviewToolFactory } from './create-review';
 import { getCIStatusToolFactory } from './get-ci-status';
 import { getWorkflowRunLogsToolFactory } from './get-workflow-run-logs';
 import { createSummarizeToolFactory } from './summarize';
+import { diagnoseCIFailureToolFactory } from './diagnose-ci-failure';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import type { PlatformProvider } from '../../platform';
 import type { DiffConfig } from '../../types';
@@ -72,6 +73,9 @@ export function createToolsFactory(
       // Platform-agnostic: uses the SDK's extension model-call API
       // (ctx.modelRegistry) rather than the platform provider.
       createSummarizeToolFactory(),
+      // Platform-agnostic composite: chains get_ci_status →
+      // get_workflow_run_logs → summarize_text via ctx.executeTool().
+      diagnoseCIFailureToolFactory(),
     ];
     tools.forEach(tool => {
       pi.registerTool(tool);

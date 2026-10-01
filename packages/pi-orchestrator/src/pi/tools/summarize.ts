@@ -24,6 +24,12 @@ import { CANCELLATION_MESSAGE_SUMMARIZE } from './constants';
 import { nullable, PREFER_STRICT_JSON_SCHEMA } from './schema';
 import { isPresent } from './tool-execution';
 import type { AgentToolResult, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import {
+  PI_ACTION_NAMESPACE,
+  READ_ONLY_ANNOTATIONS,
+  summarizeOutputSchema,
+  toStructuredContent,
+} from './metadata';
 
 /** Details returned with each summarize_text tool result. */
 export interface SummarizeTextDetails {
@@ -113,6 +119,9 @@ export function createSummarizeToolFactory() {
     promptGuidelines: SUMMARIZE_TEXT_PROMPT_GUIDELINES,
     parameters: summarizeTextSchema,
     constrainedSampling: PREFER_STRICT_JSON_SCHEMA,
+    namespace: PI_ACTION_NAMESPACE,
+    annotations: READ_ONLY_ANNOTATIONS,
+    outputSchema: summarizeOutputSchema,
     execute: async (
       _toolCallId: string,
       params: SummarizeTextToolParams,
@@ -131,6 +140,7 @@ export function createSummarizeToolFactory() {
         return {
           content: [{ type: 'text' as const, text: CANCELLATION_MESSAGE_SUMMARIZE }],
           details: { ...baseDetails, cancelled: true },
+          structuredContent: toStructuredContent({ ...baseDetails, cancelled: true }),
         };
       }
 
@@ -140,6 +150,11 @@ export function createSummarizeToolFactory() {
             { type: 'text' as const, text: 'No model available for the summarization sub-call' },
           ],
           details: { ...baseDetails, error: 'no model available' },
+          structuredContent: toStructuredContent({
+            ...baseDetails,
+            error: 'no model available',
+          }),
+          isError: true,
         };
       }
 
@@ -164,6 +179,8 @@ export function createSummarizeToolFactory() {
           return {
             content: [{ type: 'text' as const, text: `Summarization failed: ${errorMessage}` }],
             details: { ...baseDetails, error: errorMessage },
+            structuredContent: toStructuredContent({ ...baseDetails, error: errorMessage }),
+            isError: true,
           };
         }
 
@@ -172,18 +189,23 @@ export function createSummarizeToolFactory() {
           return {
             content: [{ type: 'text' as const, text: 'Summarization returned no text content' }],
             details: { ...baseDetails, error: 'empty summary' },
+            structuredContent: toStructuredContent({ ...baseDetails, error: 'empty summary' }),
+            isError: true,
           };
         }
 
         return {
           content: [{ type: 'text' as const, text: summary }],
           details: { ...baseDetails, summary },
+          structuredContent: toStructuredContent({ ...baseDetails, summary }),
         };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         return {
           content: [{ type: 'text' as const, text: `Summarization failed: ${errorMessage}` }],
           details: { ...baseDetails, error: errorMessage },
+          structuredContent: toStructuredContent({ ...baseDetails, error: errorMessage }),
+          isError: true,
         };
       }
     },

@@ -27,8 +27,15 @@ import {
 import { CANCELLATION_MESSAGE_GET_PR_DIFF } from './constants';
 import { nullable, PREFER_STRICT_JSON_SCHEMA } from './schema';
 import { withCancellation } from './tool-execution';
+import {
+  PI_ACTION_NAMESPACE,
+  READ_ONLY_ANNOTATIONS,
+  prDiffOutputSchema,
+  toStructuredContent,
+} from './metadata';
 import type { PlatformProvider } from '../../platform';
 import type { DiffConfig } from '../../types';
+import type { JsonValue } from '@earendil-works/pi-agent-core';
 
 /**
  * Schema for the get_pr_diff tool.
@@ -227,15 +234,22 @@ export function resolvePRParams(
 interface GetPRDiffResult {
   content: { type: 'text'; text: string }[];
   details: GetPRDiffDetails;
+  structuredContent: JsonValue;
 }
 
 /**
  * Build a uniform tool result: a single text content block paired with
- * details. Collapses the three identical `{ content, details }` shapes the
- * handler emits across its resolve / no-diff / success branches.
+ * details and structured content (the details metadata plus the truncated
+ * diff text for programmatic callers). Collapses the three identical
+ * `{ content, details }` shapes the handler emits across its resolve /
+ * no-diff / success branches.
  */
-function diffToolResult(text: string, details: GetPRDiffDetails): GetPRDiffResult {
-  return { content: [{ type: 'text', text }], details };
+function diffToolResult(text: string, details: GetPRDiffDetails, diff = ''): GetPRDiffResult {
+  return {
+    content: [{ type: 'text', text }],
+    details,
+    structuredContent: toStructuredContent({ ...details, diff }),
+  };
 }
 
 /**
@@ -289,7 +303,11 @@ export async function executeGetPRDiff(
     details.ignored_files = ignoreFiles;
   }
 
-  return diffToolResult(`PR #${pullNumber} Diff:\n\`\`\`diff\n${truncated.text}\n\`\`\``, details);
+  return diffToolResult(
+    `PR #${pullNumber} Diff:\n\`\`\`diff\n${truncated.text}\n\`\`\``,
+    details,
+    truncated.text
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +330,9 @@ export function getPRDiffToolFactory(provider: PlatformProvider, config?: DiffCo
     promptGuidelines: GET_PR_DIFF_PROMPT_GUIDELINES(provider.type),
     parameters: getPRDiffSchema,
     constrainedSampling: PREFER_STRICT_JSON_SCHEMA,
+    namespace: PI_ACTION_NAMESPACE,
+    annotations: READ_ONLY_ANNOTATIONS,
+    outputSchema: prDiffOutputSchema,
     execute: withCancellation<GetPRDiffToolParams, GetPRDiffDetails, GetPRDiffToolParams>({
       cancellationMessage: CANCELLATION_MESSAGE_GET_PR_DIFF,
       cancellationDetails: {
@@ -319,6 +340,7 @@ export function getPRDiffToolFactory(provider: PlatformProvider, config?: DiffCo
         lines: 0,
         truncated: false,
       },
+      errorDetails: () => ({ pull_number: 0, lines: 0, truncated: false }),
       prepareParams: params => params,
       execute: params => executeGetPRDiff(params, provider, config),
     }),

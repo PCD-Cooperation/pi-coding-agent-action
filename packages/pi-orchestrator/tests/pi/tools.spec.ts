@@ -125,8 +125,12 @@ describe('extFactory', () => {
     summarizeTextTool = getToolByName(tools, 'summarize_text')!;
   });
 
-  test('registers eight tools', () => {
-    expect(tools.length).toBe(8);
+  test('registers nine tools', () => {
+    expect(tools.length).toBe(9);
+  });
+
+  test('registers a tool named diagnose_ci_failure', () => {
+    expect(tools.find(tool => tool.name === 'diagnose_ci_failure')).toBeDefined();
   });
 
   test('registers a tool named summarize_text', () => {

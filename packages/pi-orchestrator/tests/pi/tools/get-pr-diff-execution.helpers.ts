@@ -124,6 +124,8 @@ export async function runTool(
 interface ToolExecuteResult {
   content: { type: string; text?: string }[];
   details: object;
+  isError?: boolean;
+  structuredContent?: unknown;
 }
 
 /** Asserts the post-byte-truncation details shape used by several tests. */

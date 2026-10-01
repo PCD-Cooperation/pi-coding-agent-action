@@ -105,13 +105,19 @@ describe('get_pr_diff tool - execution', () => {
     expectDefaultSuccessDetails(result);
   });
 
-  test('execute propagates provider errors (SDK sets isError)', async () => {
+  test('execute returns an isError result on provider errors', async () => {
     const getPRDiffImpl = vi.fn(async () => {
       throw new Error('API rate limit exceeded');
     });
     const { tool } = buildTool({ getPRDiffImpl });
 
-    await expect(runTool(tool)).rejects.toThrow('API rate limit exceeded');
+    const result = await runTool(tool);
+    expect(result.isError).toBe(true);
+    expect(result.content[0]).toEqual({
+      type: 'text',
+      text: 'Tool execution failed: API rate limit exceeded',
+    });
+    expect(result.structuredContent).toEqual({ error: 'API rate limit exceeded' });
   });
 
   test('execute truncates diff when max_lines is exceeded', async () => {

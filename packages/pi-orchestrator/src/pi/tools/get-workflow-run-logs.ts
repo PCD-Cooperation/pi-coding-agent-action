@@ -19,6 +19,12 @@ import {
 import { CANCELLATION_MESSAGE_GET_WORKFLOW_RUN_LOGS } from './constants';
 import { nullable, PREFER_STRICT_JSON_SCHEMA } from './schema';
 import { withCancellation, isPresent } from './tool-execution';
+import {
+  PI_ACTION_NAMESPACE,
+  READ_ONLY_ANNOTATIONS,
+  toStructuredContent,
+  workflowRunLogsOutputSchema,
+} from './metadata';
 import type {
   PlatformProvider,
   GetWorkflowRunLogsParams,
@@ -69,6 +75,9 @@ export function getWorkflowRunLogsToolFactory(provider: PlatformProvider) {
     promptGuidelines: GET_WORKFLOW_RUN_LOGS_PROMPT_GUIDELINES,
     parameters: getWorkflowRunLogsSchema,
     constrainedSampling: PREFER_STRICT_JSON_SCHEMA,
+    namespace: PI_ACTION_NAMESPACE,
+    annotations: READ_ONLY_ANNOTATIONS,
+    outputSchema: workflowRunLogsOutputSchema,
     execute: withCancellation({
       cancellationMessage: CANCELLATION_MESSAGE_GET_WORKFLOW_RUN_LOGS,
       cancellationDetails: {
@@ -77,6 +86,7 @@ export function getWorkflowRunLogsToolFactory(provider: PlatformProvider) {
         total_bytes: 0,
         truncated: false,
       },
+      structuredContent: toStructuredContent,
       prepareParams: (params: GetWorkflowRunLogsToolParams): GetWorkflowRunLogsParams => ({
         ...(isPresent(params.owner) ? { owner: params.owner } : {}),
         ...(isPresent(params.repo) ? { repo: params.repo } : {}),

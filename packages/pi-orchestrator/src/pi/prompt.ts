@@ -414,3 +414,36 @@ export const SUMMARIZE_TEXT_PARAM_FOCUS_DESCRIPTION =
 
 export const SUMMARIZE_TEXT_PARAM_MAX_WORDS_DESCRIPTION =
   'Approximate maximum length of the summary in words. Defaults to 300.';
+
+//
+// Diagnose CI Failure
+//
+export const DIAGNOSE_CI_FAILURE_PROMPT_SNIPPET =
+  'Diagnose CI failures in one step: fetches CI status, pulls the logs of failed workflow runs, and returns an LLM-summarized root-cause analysis.';
+
+export const DIAGNOSE_CI_FAILURE_PROMPT_GUIDELINES = [
+  'Use diagnose_ci_failure to investigate failing CI in a single call instead of chaining get_ci_status → get_workflow_run_logs → summarize_text manually.',
+  'Prefer this tool when CI is already known to be failing; use get_ci_status first when you only need to know whether CI passed.',
+  'Use `focus` to steer the analysis (e.g. "why did the lint job fail"). Use `max_words` to bound the summary length.',
+];
+
+export const DIAGNOSE_CI_FAILURE_DESCRIPTION =
+  'Diagnose CI failures for a pull request or commit ref in a single call. Fetches the CI status, retrieves the logs of failed workflow runs, and returns a concise root-cause summary produced by a separate LLM sub-call. Returns the passing status without logs when CI is green.';
+
+export const DIAGNOSE_CI_FAILURE_PARAM_OWNER_DESCRIPTION =
+  'Repository owner (e.g., "octocat"). If not provided, uses the current repository from context.';
+
+export const DIAGNOSE_CI_FAILURE_PARAM_REPO_DESCRIPTION =
+  'Repository name (e.g., "hello-world"). If not provided, uses the current repository from context.';
+
+export const DIAGNOSE_CI_FAILURE_PARAM_PULL_NUMBER_DESCRIPTION =
+  'Pull request number. If not provided, uses the current PR from context. Alternative to providing a ref.';
+
+export const DIAGNOSE_CI_FAILURE_PARAM_REF_DESCRIPTION =
+  'Git ref (commit SHA or branch name) to check. If not provided, resolved from pull_number or context.';
+
+export const DIAGNOSE_CI_FAILURE_PARAM_FOCUS_DESCRIPTION =
+  'Optional instruction for what the failure analysis should focus on (e.g. "the failing test names and their assertions").';
+
+export const DIAGNOSE_CI_FAILURE_PARAM_MAX_WORDS_DESCRIPTION =
+  'Approximate maximum length of the failure summary in words. Defaults to 300.';
