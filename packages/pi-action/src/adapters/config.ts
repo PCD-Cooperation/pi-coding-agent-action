@@ -164,6 +164,10 @@ export function gatherActionsConfig(): PiConfig {
   const provider = core.getInput('provider');
   const model = core.getInput('model');
   const token = core.getInput('token');
+  const copilotOAuthToken = core.getInput('copilot_oauth_token') || undefined;
+  if (copilotOAuthToken) {
+    core.setSecret(copilotOAuthToken);
+  }
 
   validateRequiredInputs(provider, model);
 
@@ -242,6 +246,7 @@ export function gatherActionsConfig(): PiConfig {
     provider,
     model,
     token,
+    ...(copilotOAuthToken ? { copilotOAuthToken } : {}),
     thinkingLevel,
     promptInput,
     ...(extensions?.length ? { extensions } : {}),

@@ -20,6 +20,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import { clampThinkingLevel, getSupportedThinkingLevels } from '@earendil-works/pi-ai';
 import { buildResourceLoaderOptions } from './resource-loader';
+import { createCopilotCredentials } from './copilot-credentials';
 import { getPiVersion } from '../version';
 
 import type { AgentSession, AgentSessionEvent } from '@earendil-works/pi-coding-agent';
@@ -153,7 +154,8 @@ export class Agent {
     // AuthStorage + ModelRegistry pair). ModelRuntime.create() is async
     // (it refreshes the model catalog), so initialisation happens here in
     // ready() rather than in the constructor.
-    this.modelRuntime = await ModelRuntime.create();
+    const credentials = await createCopilotCredentials(this.config, this.events.onAuthToken);
+    this.modelRuntime = await ModelRuntime.create(credentials ? { credentials } : undefined);
 
     if (this.config.token) {
       this.logger.debug(`[auth] Setting api_key token for ${this.config.provider} provider`);

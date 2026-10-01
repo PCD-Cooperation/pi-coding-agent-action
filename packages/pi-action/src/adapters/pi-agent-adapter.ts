@@ -15,6 +15,7 @@
  * short-lived execution.
  */
 
+import * as core from '@actions/core';
 import type {
   PiAgent,
   PiAgentFactory,
@@ -36,6 +37,7 @@ export const createRealPiAgent: PiAgentFactory = (
   provider: PlatformProvider
 ): PiAgent => {
   const events: AgentEvents = {
+    onAuthToken: token => core.setSecret(token),
     onThinkingDelta: delta => process.stdout.write(delta),
     onThinkingComplete: () => process.stdout.write('\n'),
     onPromptComplete: () => process.stdout.write('\n'),

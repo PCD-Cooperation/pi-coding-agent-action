@@ -37,21 +37,19 @@ export {
  * from a temporary installation directory, where their Pi peer dependencies
  * cannot resolve back to the bundled host runtime.
  *
- * The SDK already exposes those inlined modules through `VIRTUAL_MODULES` for
- * Bun. Use the same mechanism for bundled Node.js instead of asking jiti to
- * resolve packages from the temporary npm directory. `tryNative: false` keeps
- * jiti from bypassing the map and loading a second copy from the filesystem.
+ * The SDK's embedded-module mode supplies its host virtual modules and the
+ * static jiti transform. Select that mode for this standalone action bundle.
  *
- * This patch can be removed once the SDK uses virtual modules for bundled Node
- * by default.
+ * The SDK cannot identify our independently packaged action as its own bundled
+ * Node distribution, so the build sets the loader's mode explicitly.
  */
-const SDK_LOADER_NODE_BRANCH = /: \{ alias: getAliases\(\) \}\),/;
+const SDK_LOADER_EMBEDDED_MODE = /const usesEmbeddedModules = isBunBinary \|\| isNodeSeaBinary \|\| isBundledNode;/;
 
 /** Apply the bundled Node extension-loader patch to SDK source. */
 export function patchSDKLoaderSource(source: string): string {
   const patched = source.replace(
-    SDK_LOADER_NODE_BRANCH,
-    ': { virtualModules: VIRTUAL_MODULES, tryNative: false }),'
+    SDK_LOADER_EMBEDDED_MODE,
+    'const usesEmbeddedModules = true;'
   );
   if (patched === source) {
     throw new Error(

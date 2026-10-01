@@ -6,10 +6,10 @@
  */
 
 import type { PlatformProvider } from '@alexanderfortin/pi-orchestrator';
-import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
+import type { ExtensionToolContext } from '@earendil-works/pi-coding-agent';
 
 /**
- * Minimal mock `ExtensionContext` that satisfies the tool `execute` signature.
+ * Minimal mock `ExtensionToolContext` that satisfies the tool `execute` signature.
  * Safe to share across tests since it is never mutated by tool code.
  */
 export const mockExtensionContext = {
@@ -27,7 +27,11 @@ export const mockExtensionContext = {
   getContextUsage: () => undefined,
   compact: () => {},
   getSystemPrompt: () => '',
-} as unknown as ExtensionContext;
+  tools: [],
+  executeTool: async () => {
+    throw new Error('Nested tool execution is not configured in this test context');
+  },
+} as unknown as ExtensionToolContext;
 
 export interface MockProviderContextOptions {
   /** Issue/PR number exposed via `provider.getContext().issue.number`. Defaults to `1`. */

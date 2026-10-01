@@ -21,6 +21,10 @@ inputs:
     description: 'API token for the LLM provider. Required for most providers, but can be omitted when using providers that support alternative auth mechanisms (e.g. google-vertex with Application Default Credentials).'
     required: false
 
+  copilot_oauth_token:
+    description: 'GitHub user OAuth token for provider github-copilot. Pi exchanges it for short-lived Copilot tokens and renews them automatically in memory. Store the non-expiring user OAuth token in an Actions secret. Omit token when using this input.'
+    required: false
+
   thinking_level:
     description: 'Thinking level (e.g. off, low, medium, high, etc.)'
     required: false
