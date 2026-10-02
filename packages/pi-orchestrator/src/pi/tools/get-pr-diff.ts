@@ -35,7 +35,7 @@ import {
 } from './metadata';
 import type { PlatformProvider } from '../../platform';
 import type { DiffConfig } from '../../types';
-import type { JsonValue } from '@earendil-works/pi-agent-core';
+import type { JsonValue } from '@earendil-works/pi-ai';
 
 /**
  * Schema for the get_pr_diff tool.

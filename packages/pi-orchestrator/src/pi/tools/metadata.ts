@@ -15,7 +15,7 @@
 
 import { Type } from 'typebox';
 import type { ToolAnnotations, ToolNamespace } from '@earendil-works/pi-coding-agent';
-import type { JsonValue } from '@earendil-works/pi-agent-core';
+import type { JsonValue } from '@earendil-works/pi-ai';
 import { nullable } from './schema';
 
 // ---------------------------------------------------------------------------

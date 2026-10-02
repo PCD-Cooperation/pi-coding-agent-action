@@ -11,7 +11,7 @@ import type {
   ExtensionContext,
 } from '@earendil-works/pi-coding-agent';
 import { toStructuredContent } from './metadata';
-import type { JsonValue } from '@earendil-works/pi-agent-core';
+import type { JsonValue } from '@earendil-works/pi-ai';
 
 /**
  * Type guard: true when `value` is neither `null` nor `undefined`.
