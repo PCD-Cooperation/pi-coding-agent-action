@@ -75,8 +75,8 @@ If you need to pin to a specific Pi SDK version check out previous release tags 
 |---|---|---|
 | `@actions/core` | `3.0.1` | GitHub Actions core I/O (inputs, outputs, logging) |
 | `@actions/github` | `9.1.1` | GitHub API client (Octokit wrapper) |
-| `@earendil-works/pi-agent-core` | `1.0.0` | Pi Agent Core — agent orchestration primitives |
-| `@earendil-works/pi-ai` | `1.0.0` | Pi AI — AI model abstractions and providers |
+| `@earendil-works/pi-agent-core` | `1.0.2` | Pi Agent Core — agent orchestration primitives |
+| `@earendil-works/pi-ai` | `1.0.2` | Pi AI — AI model abstractions and providers |
 | `@earendil-works/pi-coding-agent` | `1.0.0` | Pi SDK — AI coding agent runtime |
 | `@js-temporal/polyfill` | `0.5.1` | Temporal API polyfill |
 | `@octokit/core` | `7.0.6` | Octokit REST API client core |
