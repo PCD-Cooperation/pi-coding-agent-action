@@ -78,10 +78,12 @@ If you need to pin to a specific Pi SDK version check out previous release tags 
 | `@earendil-works/pi-agent-core` | `1.0.4` | Pi Agent Core — agent orchestration primitives |
 | `@earendil-works/pi-ai` | `1.0.4` | Pi AI — AI model abstractions and providers |
 | `@earendil-works/pi-coding-agent` | `1.0.4` | Pi SDK — AI coding agent runtime |
+| `@earendil-works/pi-tui` | `1.0.4` |  |
 | `@js-temporal/polyfill` | `0.5.1` | Temporal API polyfill |
 | `@octokit/core` | `7.0.6` | Octokit REST API client core |
 | `@octokit/plugin-rest-endpoint-methods` | `17.0.0` | Octokit REST API endpoint methods |
 | `ignore` | `7.0.6` | `.gitignore`-style pattern matching |
+| `jiti` | `2.7.0` |  |
 | `simple-git` | `3.36.0` |  |
 | `typebox` | `1.3.6` | JSON Schema Type Builder |
 
