@@ -476,6 +476,35 @@ jobs:
 >           prompt: 'Review this PR for bugs, security, and improvements.'
 > ```
 
+### Bounded automatic review delegation
+
+Set `enable_review_subagents: true` with `provider: github-copilot` and
+`copilot_oauth_token` to enable the pinned `pi-subagents@0.76.1` executor.
+Include `subagent` and `wait_subagents` in an explicit `loaded_tools` list.
+Enable `enable_codemode: true` and include `codemode` for the parent reviewer.
+
+The parent defaults to reviewing alone and chooses whether to delegate. `subagent`
+accepts `tasks: [{scope, task}, ...]` and starts one parallel batch of 1–3 children,
+returning immediately so the parent can continue independent review. Collect the
+batch with `wait_subagents` before starting another batch or publishing the final
+report. The cumulative budget is three children per session, including failures.
+
+Children use `github-copilot/gpt-6-luna:high`, the parent's in-memory OAuth runtime,
+and only `read`, `grep`, `find`, `ls`, and the SDK's official `codemode` extension.
+They do not load project instructions, skills, ambient extensions or nested
+subagent tools. Each batch has a five-minute deadline and each child a 60-call
+hard tool budget. Child usage is added exactly once when results are collected.
+
+Use a dedicated temporary `PI_CODING_AGENT_DIR` in CI. On first use, the adapter
+creates a private `extensions/subagent/config.json` with the package's documented
+`workflow-scripts` feature disabled to expose bounded parallel task batches.
+An existing incompatible config fails without being overwritten. Package-owned
+sessions and timers are shut down before the action exits. A review with
+uncollected child findings fails instead of publishing a clean result.
+
+For a pilot, `publish_comment: false` keeps the final response and usage in action
+outputs without publishing a PR comment. Normal workflows default to publishing.
+
 ### Custom Extensions
 
 You can load custom Pi extensions to add additional custom tools or modify agent behavior:

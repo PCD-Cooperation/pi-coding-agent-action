@@ -413,12 +413,16 @@ export function gatherActionsConfig(): PiConfig {
     provider,
     model,
     token,
+    publishComment: parseBooleanInput(core.getInput('publish_comment'), true),
     ...(copilotOAuthToken ? { copilotOAuthToken } : {}),
     thinkingLevel,
     promptInput,
     ...(extensions?.length ? { extensions } : {}),
     loadBuiltinExtensions,
     ...(loadedTools ? { loadedTools } : {}),
+    ...(parseBooleanInput(core.getInput('enable_review_subagents'), false)
+      ? { enableReviewSubagents: true }
+      : {}),
     ...(enableCodemode ? { enableCodemode } : {}),
     ...(enableToolSearch ? { enableToolSearch } : {}),
     ...(mcp ? { mcpServers: mcp.servers } : {}),

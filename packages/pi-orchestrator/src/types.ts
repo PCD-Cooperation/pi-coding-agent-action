@@ -115,7 +115,7 @@ export interface PiAgent {
   /** Export the session as a JSONL file to the given path. */
   exportSessionJsonl(outputPath: string): Promise<string>;
   /** Release the underlying session and any provider resources it owns. */
-  dispose(): void;
+  dispose(): void | Promise<void>;
 }
 
 /**
@@ -215,6 +215,8 @@ export interface ResourceLoaderConfig extends DiffConfig {
    * auto-enable. Defaults to `false`.
    */
   enableCodemode?: boolean;
+  /** Enable bounded background review children using the native Copilot runtime. */
+  enableReviewSubagents?: boolean;
   /**
    * Enable the built-in `tool_search` tool, which loads tools with `deferred`
    * exposure (typically MCP servers) into the model's declarations on demand.
@@ -239,6 +241,8 @@ export interface ResourceLoaderConfig extends DiffConfig {
  * Configuration for the Pi agent.
  */
 export interface PiConfig extends DiffConfig {
+  /** Publish the final comment; false keeps the result in action outputs for a pilot. */
+  publishComment?: boolean;
   provider: string;
   model: string;
   token: string;
@@ -257,6 +261,8 @@ export interface PiConfig extends DiffConfig {
   baseUrl?: string;
   /** Enable the built-in `codemode` tool (parallel JS tool orchestration). */
   enableCodemode?: boolean;
+  /** Enable bounded background review children using the native Copilot runtime. */
+  enableReviewSubagents?: boolean;
   /** Enable the built-in `tool_search` tool (load `deferred`-exposure tools on demand). */
   enableToolSearch?: boolean;
   /** MCP servers to register for the session, keyed by server name. */

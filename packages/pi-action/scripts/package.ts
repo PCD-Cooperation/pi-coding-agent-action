@@ -197,10 +197,11 @@ export async function buildDist(cwd: string = process.cwd()): Promise<void> {
       platform: 'node',
       target: 'node24',
       outfile: join(cwd, 'dist/codemode-worker.js'),
-      format: 'cjs',
+      format: 'esm',
       minify: true,
-      define: buildDefines,
-      inject: [join(cwd, 'packages/pi-action/src/import-meta-url.js')],
+      // Pi 1.0.4 loads the worker from a data: URL, which requires ESM.
+      // It must not contain the main bundle's CommonJS import.meta shim.
+      define: { PI_BUNDLED_NODE: 'true' },
     });
   } else {
     console.warn(

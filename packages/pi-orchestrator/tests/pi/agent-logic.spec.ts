@@ -6,6 +6,7 @@
 
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { resolve } from 'node:path';
+import { ReviewCoordinator } from '../../src/pi/review-subagents/coordinator';
 import { CredentialSynchronizationError, ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { buildMockSession, injectMockSession, userHelloMessage } from './helpers/agent-session';
 import type { MockSession, MockSessionEvent } from './helpers/agent-session';
@@ -601,6 +602,17 @@ describe('Agent', () => {
         },
         error: undefined,
       });
+    });
+
+    test('rejects a final report while child findings are uncollected', async () => {
+      const agent = createRealAgent();
+      await agent.ready();
+      injectMockSession(agent, buildMockSession({ messages: [] }));
+      const coordinator = new ReviewCoordinator();
+      coordinator.start(async () => ({ content: [], details: undefined }));
+      Object.assign(agent, { reviewCoordinator: coordinator });
+      await expect(agent.run('Review')).rejects.toThrow('child findings were not collected');
+      await coordinator.close();
     });
 
     test('exposes session stats via getSessionStats()', async () => {

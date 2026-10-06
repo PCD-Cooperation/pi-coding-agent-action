@@ -277,6 +277,34 @@ describe('ActionOrchestrator', () => {
       expect(mockGit.deleteReaction).toHaveBeenCalledWith(mockReaction);
     });
 
+    test('pilot returns result outputs without publishing a comment', async () => {
+      const orchestrator = createOrchestrator({ publishComment: false });
+      await orchestrator.execute();
+      expect(mockGit.createFinalComment).not.toHaveBeenCalled();
+      expect(mockOutputSink.setOutput).toHaveBeenCalledWith('success', true);
+    });
+
+    test('awaits asynchronous cleanup before completing', async () => {
+      let finish!: () => void;
+      (mockPiAgent.dispose as any).mockImplementation(
+        () =>
+          new Promise<void>(resolve => {
+            finish = resolve;
+          })
+      );
+      const execution = createOrchestrator().execute();
+      await vi.waitFor(() => expect(mockPiAgent.dispose).toHaveBeenCalledOnce());
+      let completed = false;
+      void execution.then(() => {
+        completed = true;
+      });
+      await Promise.resolve();
+      expect(completed).toBe(false);
+      finish();
+      await execution;
+      expect(completed).toBe(true);
+    });
+
     test('disposes the Pi session after successful finalization', async () => {
       const orchestrator = createOrchestrator();
       await orchestrator.execute();

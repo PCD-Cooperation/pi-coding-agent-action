@@ -21,6 +21,9 @@ import {
 import { clampThinkingLevel, getSupportedThinkingLevels } from '@earendil-works/pi-ai';
 import { buildResourceLoaderOptions } from './resource-loader';
 import { createCopilotCredentials } from './copilot-credentials';
+import { REVIEW_SUBAGENTS_PACKAGE, reviewSubagentsFactory } from './review-subagents/extension';
+import { resolveExtensions } from './resource-loader';
+import type { ReviewCoordinator } from './review-subagents/coordinator';
 import { getPiVersion } from '../version';
 
 import type { AgentSession, AgentSessionEvent } from '@earendil-works/pi-coding-agent';
@@ -70,6 +73,7 @@ const MODEL_REFRESH_TIMEOUT_MS = 15_000;
  * execution into a simple interface: construct → {@link ready} → {@link run}.
  */
 export class Agent {
+  private reviewCoordinator?: ReviewCoordinator;
   private model!: Model<Api>;
   private modelRuntime!: ModelRuntime;
   private session!: AgentSession;
@@ -156,6 +160,28 @@ export class Agent {
     // ready() rather than in the constructor.
     const credentials = await createCopilotCredentials(this.config, this.events.onAuthToken);
     this.modelRuntime = await ModelRuntime.create(credentials ? { credentials } : undefined);
+
+    if (this.config.enableReviewSubagents) {
+      if (this.config.provider !== 'github-copilot' || !this.config.copilotOAuthToken) {
+        throw new Error('Review subagents require native Copilot OAuth.');
+      }
+      const { paths } = await resolveExtensions([REVIEW_SUBAGENTS_PACKAGE], cwd);
+      if (paths.length !== 1) {
+        throw new Error('Could not resolve pinned review subagent extension.');
+      }
+      resourceLoaderOptions.extensionFactories.push(
+        reviewSubagentsFactory(
+          paths[0]!,
+          this.modelRuntime,
+          coordinator => {
+            this.reviewCoordinator = coordinator;
+          },
+          () => {
+            this.outputChunks = [];
+          }
+        )
+      );
+    }
 
     if (this.config.token) {
       this.logger.debug(`[auth] Setting api_key token for ${this.config.provider} provider`);
@@ -454,6 +480,9 @@ export class Agent {
     this.lastAgentError = undefined;
 
     await this.session.prompt(text);
+    if (this.reviewCoordinator?.uncollected) {
+      throw new Error('Incomplete review: child findings were not collected.');
+    }
 
     // onPromptComplete is now routed through the agent_settled event
     // handler, so it fires when the session has truly settled.
@@ -516,8 +545,14 @@ export class Agent {
    * for five minutes. `AgentSession.dispose()` closes that socket and clears
    * its expiry timer so headless callers can exit immediately.
    */
-  dispose(): void {
-    this.session?.dispose();
+  async dispose(): Promise<void> {
+    try {
+      if (this.config.enableReviewSubagents) {
+        await this.session?.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+      }
+    } finally {
+      this.session?.dispose();
+    }
   }
 
   /**
@@ -754,7 +789,7 @@ export function wrapAgent(agent: Agent): PiAgent {
       return agent.exportSessionJsonl(outputPath);
     },
     dispose() {
-      agent.dispose();
+      return agent.dispose();
     },
   };
 }

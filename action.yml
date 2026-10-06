@@ -54,6 +54,11 @@ inputs:
     required: false
     default: 'all'
 
+  enable_review_subagents:
+    description: 'Enable bounded background PR review children using pinned pi-subagents 0.76.1, the same in-memory Copilot OAuth, gpt-6-luna/high, read-only tools and codemode. At most 3 children per session.'
+    required: false
+    default: 'false'
+
   enable_codemode:
     description: 'Enable the built-in `codemode` tool: the agent writes JavaScript that orchestrates tools (including MCP tools) in parallel and can reduce large results before they reach the model, cutting prompt tokens on tool-heavy tasks. `codemode` is also activated automatically when an MCP server with `codemode` exposure connects. Note: an explicit `loaded_tools` allowlist must include `codemode` for it to be active.'
     required: false
@@ -148,6 +153,11 @@ inputs:
     description: 'Pull request number to target. Use this with workflow_dispatch to run the agent on a specific PR without a triggering event. When set, the action fetches PR context and posts the result as a comment on the specified PR.'
     required: false
     default: ''
+
+  publish_comment:
+    description: 'Publish the final result as a PR/issue comment. Set false for a pilot that only returns action outputs.'
+    required: false
+    default: 'true'
 
   update_comment:
     description: 'Whether to update/overwrite the bot''s previous comment on the issue/PR instead of creating a new one.'

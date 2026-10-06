@@ -159,6 +159,13 @@ describe('gatherActionsConfig', () => {
   });
 
   describe('orchestration tools and MCP inputs', () => {
+    test('review delegation is opt-in and pilot publishing defaults on', () => {
+      expect(gatherActionsConfig().enableReviewSubagents).toBeUndefined();
+      expect(gatherActionsConfig().publishComment).toBe(true);
+      mockCore({ enable_review_subagents: 'true', publish_comment: 'false' });
+      expect(gatherActionsConfig().enableReviewSubagents).toBe(true);
+      expect(gatherActionsConfig().publishComment).toBe(false);
+    });
     test('enable_codemode defaults to false and omits the key', () => {
       expect(gatherActionsConfig().enableCodemode).toBeUndefined();
     });

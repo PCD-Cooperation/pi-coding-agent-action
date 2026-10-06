@@ -129,7 +129,7 @@ export class ActionOrchestrator {
       await this.handleUncaughtError(e, startTime, reaction, pi);
       throw e;
     } finally {
-      this.disposeAgentBestEffort(pi);
+      await this.disposeAgentBestEffort(pi);
     }
   }
 
@@ -139,13 +139,13 @@ export class ActionOrchestrator {
    * Codex WebSocket cache, whose five-minute idle timer otherwise keeps a
    * headless Node.js process alive after the review has finished.
    */
-  private disposeAgentBestEffort(pi: PiAgent | undefined): void {
+  private async disposeAgentBestEffort(pi: PiAgent | undefined): Promise<void> {
     if (!pi) {
       return;
     }
 
     try {
-      pi.dispose();
+      await pi.dispose();
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : String(e);
       this.logger.notice(`failed to dispose Pi agent session: ${errorMessage}`);
@@ -583,6 +583,8 @@ export class ActionOrchestrator {
       metadata.sessionStats = sessionStats;
     }
 
-    await this.git.createFinalComment(body, metadata);
+    if (config.publishComment !== false) {
+      await this.git.createFinalComment(body, metadata);
+    }
   }
 }
