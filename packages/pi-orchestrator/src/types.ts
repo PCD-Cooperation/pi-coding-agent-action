@@ -6,6 +6,7 @@
  */
 
 import type { Temporal } from '@js-temporal/polyfill';
+import type { CacheWarmingMode, McpServerConfig } from '@earendil-works/pi-coding-agent';
 import type { CreateReactionType, PlatformProvider } from './platform';
 import type { OpengistExpiration } from './share/opengist';
 
@@ -114,7 +115,7 @@ export interface PiAgent {
   /** Export the session as a JSONL file to the given path. */
   exportSessionJsonl(outputPath: string): Promise<string>;
   /** Release the underlying session and any provider resources it owns. */
-  dispose(): void;
+  dispose(): void | Promise<void>;
 }
 
 /**
@@ -207,12 +208,43 @@ export interface ResourceLoaderConfig extends DiffConfig {
   systemPrompt?: string;
   /** Working directory. Defaults to `process.cwd()`. */
   cwd?: string;
+  /**
+   * Enable the built-in `codemode` tool: models run JavaScript that orchestrates
+   * tools (including MCP tools) in parallel and can reduce large results before
+   * they reach the model. Registered inactive unless enabled here or via MCP
+   * auto-enable. Defaults to `false`.
+   */
+  enableCodemode?: boolean;
+  /** Enable bounded background review children using the native Copilot runtime. */
+  enableReviewSubagents?: boolean;
+  /** Cumulative child limit per review, including failures. Defaults to 3. */
+  maxReviewSubagents?: number;
+  /**
+   * Enable the built-in `tool_search` tool, which loads tools with `deferred`
+   * exposure (typically MCP servers) into the model's declarations on demand.
+   * Defaults to `false`.
+   */
+  enableToolSearch?: boolean;
+  /**
+   * MCP servers to register for the session, keyed by server name. Supplied via
+   * the extension API so it works without a trusted `mcp.json` on disk (the
+   * GitHub Action's usual case). Loading any servers also loads the codemode,
+   * tool search, and MCP extensions.
+   */
+  mcpServers?: Record<string, McpServerConfig>;
+  /**
+   * Whether connecting a `codemode`-exposure MCP server activates the codemode
+   * tool. Defaults to the SDK default (`true`).
+   */
+  mcpAutoEnableCodemode?: boolean;
 }
 
 /**
  * Configuration for the Pi agent.
  */
 export interface PiConfig extends DiffConfig {
+  /** Publish the final comment; false keeps the result in action outputs for a pilot. */
+  publishComment?: boolean;
   provider: string;
   model: string;
   token: string;
@@ -229,9 +261,36 @@ export interface PiConfig extends DiffConfig {
    */
   loadedTools?: string[];
   baseUrl?: string;
+  /** Enable the built-in `codemode` tool (parallel JS tool orchestration). */
+  enableCodemode?: boolean;
+  /** Enable bounded background review children using the native Copilot runtime. */
+  enableReviewSubagents?: boolean;
+  /** Cumulative child limit per review, including failures. Defaults to 3. */
+  maxReviewSubagents?: number;
+  /** Enable the built-in `tool_search` tool (load `deferred`-exposure tools on demand). */
+  enableToolSearch?: boolean;
+  /** MCP servers to register for the session, keyed by server name. */
+  mcpServers?: Record<string, McpServerConfig>;
+  /** Whether `codemode`-exposure MCP servers auto-activate codemode. */
+  mcpAutoEnableCodemode?: boolean;
+  /**
+   * Whether to refresh the provider's model catalog from pi.dev at startup
+   * (after credential synchronisation) so models newer than the bundled SDK
+   * resolve. Defaults to `true`; set to `false` to skip the network round-trip
+   * and shorten boot time (the bundled model list is used instead).
+   */
+  refreshModelCatalog?: boolean;
   exportSessionHtml?: boolean;
   exportSessionJsonl?: boolean;
   autoCompaction?: boolean;
+  /**
+   * Prompt cache-warming mode (`"off"`, `"streaming"`, or `"idle"`).
+   *
+   * Keeps expensive prompt-cache prefixes alive during long tool runs
+   * (and, with `"idle"`, between prompts) using cost-aware one-token
+   * refreshes. `undefined` leaves the SDK default (`"streaming"`).
+   */
+  cacheWarming?: CacheWarmingMode;
   /**
    * Share the session like pi's `/share` command: upload the exported
    * HTML to a secret GitHub Gist and surface a pi.dev-style viewer link.

@@ -47,7 +47,7 @@ export const BIG_DIFF_CONFIG: DiffConfig = { diffMaxBytes: 500 };
 /** Re-export so specs can stay single-import. */
 export { createMockProvider };
 
-/** Re-exported mock context for tool execution. */
+/** Re-exported mock context (typed as `ExtensionContext`) for `execute`. */
 export const mockCtx: ExtensionToolContext = mockExtensionContext;
 
 export interface BuildToolOptions {
@@ -97,6 +97,8 @@ const DEFAULT_ARGS = Object.freeze({
   owner: 'test-owner',
   repo: 'test-repo',
   pull_number: 42,
+  max_lines: null,
+  ignore_files: null,
 });
 
 /**
@@ -122,6 +124,8 @@ export async function runTool(
 interface ToolExecuteResult {
   content: { type: string; text?: string }[];
   details: object;
+  isError?: boolean;
+  structuredContent?: unknown;
 }
 
 /** Asserts the post-byte-truncation details shape used by several tests. */

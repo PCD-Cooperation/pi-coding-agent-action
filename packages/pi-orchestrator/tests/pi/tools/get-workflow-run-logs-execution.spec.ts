@@ -100,16 +100,20 @@ describe('get_workflow_run_logs tool - execution', () => {
     expect((getWorkflowRunLogs as any).mock.calls[0][0].max_bytes).toBeUndefined();
   });
 
-  test('execute propagates provider errors', async () => {
+  test('execute returns an isError result on provider errors', async () => {
     const getWorkflowRunLogs = vi.fn(async () => {
       throw new Error('Workflow run not found');
     });
     const provider = createMockProvider({ getWorkflowRunLogs }, providerOptions);
     const tool = getWorkflowRunLogsToolFactory(provider);
 
-    await expect(
-      tool.execute('call-error', { run_id: 100 }, undefined, undefined, mockCtx)
-    ).rejects.toThrow('Workflow run not found');
+    const result = await tool.execute('call-error', { run_id: 100 }, undefined, undefined, mockCtx);
+    expect(result.isError).toBe(true);
+    expect(result.content[0]).toEqual({
+      type: 'text',
+      text: 'Tool execution failed: Workflow run not found',
+    });
+    expect(result.structuredContent).toEqual({ error: 'Workflow run not found' });
   });
 
   test('execute returns cancellation result when signal is aborted', async () => {

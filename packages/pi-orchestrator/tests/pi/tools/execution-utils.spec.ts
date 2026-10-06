@@ -130,7 +130,7 @@ describe('tool-execution utilities', () => {
       expect(result.content).toEqual([{ type: 'text', text: 'Success' }]);
     });
 
-    test('propagates execution errors', async () => {
+    test('returns an isError result with structured error content', async () => {
       const mockExecute = async () => {
         throw new Error('Execution failed');
       };
@@ -146,9 +146,13 @@ describe('tool-execution utilities', () => {
         execute: mockExecute,
       });
 
-      await expect(execute('tool-call-id', {}, undefined, undefined, mockCtx)).rejects.toThrow(
-        'Execution failed'
-      );
+      const result = await execute('tool-call-id', {}, undefined, undefined, mockCtx);
+      expect(result.isError).toBe(true);
+      expect(result.content[0]).toEqual({
+        type: 'text',
+        text: 'Tool execution failed: Execution failed',
+      });
+      expect(result.structuredContent).toEqual({ error: 'Execution failed' });
     });
 
     test('signal.aborted check happens before prepareParams', async () => {

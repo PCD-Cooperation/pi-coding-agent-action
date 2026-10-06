@@ -21,6 +21,9 @@ import {
 import { clampThinkingLevel, getSupportedThinkingLevels } from '@earendil-works/pi-ai';
 import { buildResourceLoaderOptions } from './resource-loader';
 import { createCopilotCredentials } from './copilot-credentials';
+import { REVIEW_SUBAGENTS_PACKAGE, reviewSubagentsFactory } from './review-subagents/extension';
+import { resolveExtensions } from './resource-loader';
+import type { ReviewCoordinator } from './review-subagents/coordinator';
 import { getPiVersion } from '../version';
 
 import type { AgentSession, AgentSessionEvent } from '@earendil-works/pi-coding-agent';
@@ -70,6 +73,7 @@ const MODEL_REFRESH_TIMEOUT_MS = 15_000;
  * execution into a simple interface: construct → {@link ready} → {@link run}.
  */
 export class Agent {
+  private reviewCoordinator?: ReviewCoordinator;
   private model!: Model<Api>;
   private modelRuntime!: ModelRuntime;
   private session!: AgentSession;
@@ -157,6 +161,29 @@ export class Agent {
     const credentials = await createCopilotCredentials(this.config, this.events.onAuthToken);
     this.modelRuntime = await ModelRuntime.create(credentials ? { credentials } : undefined);
 
+    if (this.config.enableReviewSubagents) {
+      if (this.config.provider !== 'github-copilot' || !this.config.copilotOAuthToken) {
+        throw new Error('Review subagents require native Copilot OAuth.');
+      }
+      const { paths } = await resolveExtensions([REVIEW_SUBAGENTS_PACKAGE], cwd);
+      if (paths.length !== 1) {
+        throw new Error('Could not resolve pinned review subagent extension.');
+      }
+      resourceLoaderOptions.extensionFactories.push(
+        reviewSubagentsFactory(
+          paths[0]!,
+          this.modelRuntime,
+          coordinator => {
+            this.reviewCoordinator = coordinator;
+          },
+          () => {
+            this.outputChunks = [];
+          },
+          this.config.maxReviewSubagents ?? 3
+        )
+      );
+    }
+
     if (this.config.token) {
       this.logger.debug(`[auth] Setting api_key token for ${this.config.provider} provider`);
       await this.applyRuntimeApiKey(this.config.token);
@@ -167,6 +194,24 @@ export class Agent {
         `[provider] Overriding base URL for ${this.config.provider}: ${this.config.baseUrl}`
       );
       this.modelRuntime.registerProvider(this.config.provider, { baseUrl: this.config.baseUrl });
+    }
+
+    // Fetch the latest model catalog from pi.dev so models newer than the bundled SDK resolve.
+    // Must run after the API key is set: the SDK only fetches catalogs for providers that have a credential.
+    // The SDK skips the network when PI_OFFLINE is set.
+    if (this.config.refreshModelCatalog === false) {
+      this.logger.debug('[models] Skipping model catalog refresh (refresh_model_catalog=false)');
+    } else {
+      const { errors } = await this.modelRuntime.refresh({
+        providers: [this.config.provider],
+        signal: AbortSignal.timeout(MODEL_REFRESH_TIMEOUT_MS),
+      });
+      const refreshError = errors.get(this.config.provider);
+      if (refreshError) {
+        this.logger.warning(
+          `[models] Could not refresh the model catalog: ${refreshError.message}`
+        );
+      }
     }
 
     // Phase 1: Create services (loads extensions, registers providers).
@@ -265,6 +310,16 @@ export class Agent {
       this.logger.info('[auto-compaction] enabled');
     }
 
+    // Apply the prompt cache-warming mode when explicitly configured. The
+    // SDK already defaults to "streaming" (protect prefixes during long
+    // tool runs); "off" disables it and "idle" also refreshes between
+    // prompts. Refreshes are billed as a cache read + one output token and
+    // only fire when the expected savings clear the SDK's cost threshold.
+    if (this.config.cacheWarming) {
+      session.setCacheWarmingMode(this.config.cacheWarming);
+      this.logger.info(`[cache-warming] mode set to "${this.config.cacheWarming}"`);
+    }
+
     // Validate that all requested tool names actually exist after extensions
     // are loaded. This provides early, actionable errors instead of silently
     // dropping unknown names.
@@ -319,6 +374,32 @@ export class Agent {
       }
     };
     this.session.subscribe(this.sessionEventHandler);
+
+    // Bind extensions to the session. `createAgentSessionFromServices` binds
+    // the core handlers but never emits `session_start`; extensions — most
+    // notably MCP, which connects its servers there — rely on it. Headless
+    // frontends bind with `mode: "print"` (there is no UI context).
+    await this.session.bindExtensions({
+      mode: 'print',
+      onError: error => this.logger.error(`[extension] ${error.extensionPath}: ${error.error}`),
+    });
+
+    // Activate the built-in orchestration tools when explicitly enabled. The
+    // SDK registers `codemode` and `tool_search` inactive; MCP servers may also
+    // activate them from `session_start` based on their exposure. Naming them
+    // still respects the `loaded_tools` allowlist (the SDK ignores tools outside
+    // it), so an explicit allowlist stays authoritative.
+    const orchestrationTools = [
+      ...(this.config.enableCodemode ? ['codemode'] : []),
+      ...(this.config.enableToolSearch ? ['tool_search'] : []),
+    ];
+    if (orchestrationTools.length > 0) {
+      this.session.setActiveToolsByName([
+        ...this.session.getActiveToolNames(),
+        ...orchestrationTools,
+      ]);
+      this.logger.info(`[tools] Activated: ${orchestrationTools.join(', ')}`);
+    }
 
     return this;
   }
@@ -400,6 +481,9 @@ export class Agent {
     this.lastAgentError = undefined;
 
     await this.session.prompt(text);
+    if (this.reviewCoordinator?.uncollected) {
+      throw new Error('Incomplete review: child findings were not collected.');
+    }
 
     // onPromptComplete is now routed through the agent_settled event
     // handler, so it fires when the session has truly settled.
@@ -462,8 +546,14 @@ export class Agent {
    * for five minutes. `AgentSession.dispose()` closes that socket and clears
    * its expiry timer so headless callers can exit immediately.
    */
-  dispose(): void {
-    this.session?.dispose();
+  async dispose(): Promise<void> {
+    try {
+      if (this.config.enableReviewSubagents) {
+        await this.session?.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+      }
+    } finally {
+      this.session?.dispose();
+    }
   }
 
   /**
@@ -700,7 +790,7 @@ export function wrapAgent(agent: Agent): PiAgent {
       return agent.exportSessionJsonl(outputPath);
     },
     dispose() {
-      agent.dispose();
+      return agent.dispose();
     },
   };
 }

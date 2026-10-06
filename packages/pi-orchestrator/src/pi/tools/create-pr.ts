@@ -15,6 +15,7 @@ import {
 } from '../prompt';
 import { CANCELLATION_MESSAGE_CREATE_PR } from './constants';
 import { nullable, PREFER_STRICT_JSON_SCHEMA } from './schema';
+import { MUTATING_ANNOTATIONS, PI_ACTION_NAMESPACE } from './metadata';
 import type {
   CreatePullRequestParams,
   CreatePullRequestDetails,
@@ -66,6 +67,8 @@ export function createPRToolFactory(provider: PlatformProvider) {
     promptGuidelines: CREATE_PULL_REQUEST_PROMPT_GUIDELINES,
     parameters: createPullRequestSchema,
     constrainedSampling: PREFER_STRICT_JSON_SCHEMA,
+    namespace: PI_ACTION_NAMESPACE,
+    annotations: MUTATING_ANNOTATIONS,
     execute: withCancellation({
       cancellationMessage: CANCELLATION_MESSAGE_CREATE_PR,
       cancellationDetails: {

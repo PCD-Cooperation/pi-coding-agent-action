@@ -111,6 +111,7 @@ describe('extFactory', () => {
   let createReviewTool: TestTool;
   let getCIStatusTool: TestTool;
   let getWorkflowRunLogsTool: TestTool;
+  let summarizeTextTool: TestTool;
 
   beforeEach(() => {
     tools = captureRegisteredTools();
@@ -121,10 +122,20 @@ describe('extFactory', () => {
     createReviewTool = getToolByName(tools, 'create_pull_request_review')!;
     getCIStatusTool = getToolByName(tools, 'get_ci_status')!;
     getWorkflowRunLogsTool = getToolByName(tools, 'get_workflow_run_logs')!;
+    summarizeTextTool = getToolByName(tools, 'summarize_text')!;
   });
 
-  test('registers seven tools', () => {
-    expect(tools.length).toBe(7);
+  test('registers nine tools', () => {
+    expect(tools.length).toBe(9);
+  });
+
+  test('registers a tool named diagnose_ci_failure', () => {
+    expect(tools.find(tool => tool.name === 'diagnose_ci_failure')).toBeDefined();
+  });
+
+  test('registers a tool named summarize_text', () => {
+    expect(summarizeTextTool).toBeDefined();
+    expect(summarizeTextTool.name).toBe('summarize_text');
   });
 
   test('registers a tool named create_pull_request', () => {

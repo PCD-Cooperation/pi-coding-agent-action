@@ -10,12 +10,20 @@
  */
 
 import {
+  createCodemodeExtension,
+  createMcpExtension,
+  createToolSearchExtension,
   DefaultPackageManager,
   DefaultResourceLoader,
   getAgentDir,
   SettingsManager,
 } from '@earendil-works/pi-coding-agent';
-import type { LoadExtensionsResult } from '@earendil-works/pi-coding-agent';
+import type {
+  ExtensionFactory,
+  LoadExtensionsResult,
+  LoadedMcpConfig,
+  McpServerEntry,
+} from '@earendil-works/pi-coding-agent';
 import { getSystemPrompt } from './prompt';
 import { createLoggingFactory } from './logging';
 import type { ExtensionLoadingInfo } from './logging';
@@ -102,6 +110,70 @@ export async function resolveExtensions(
 }
 
 /**
+ * Build the MCP extension's `loadConfig` result from the action configuration.
+ *
+ * Servers are supplied programmatically rather than read from a trusted
+ * `mcp.json`, which is what lets the GitHub Action register them from an input
+ * without project trust. Exported for testing.
+ */
+export function buildMcpLoadConfig(config?: ResourceLoaderConfig): LoadedMcpConfig {
+  const servers: McpServerEntry[] = config?.mcpServers
+    ? Object.entries(config.mcpServers).map(([name, serverConfig]) => ({
+        name,
+        config: serverConfig,
+        source: 'action input',
+        scope: 'extension' as const,
+      }))
+    : [];
+  return {
+    servers,
+    ...(config?.mcpAutoEnableCodemode === undefined
+      ? {}
+      : { autoEnableCodemode: config.mcpAutoEnableCodemode }),
+    errors: [],
+  };
+}
+
+/**
+ * Build the built-in Pi agent-tool extensions (codemode, tool search, MCP).
+ *
+ * SDK sessions do **not** load these the way the Pi CLI does; host code must add
+ * them explicitly. They are added when the matching config is present:
+ *
+ * - `codemode` / `tool_search` are registered inactive by the SDK. They are
+ *   loaded here when explicitly enabled (activation happens in the agent), and
+ *   also whenever MCP servers are configured so the MCP extension can activate
+ *   them based on each server's exposure.
+ * - MCP servers are supplied through `loadConfig` rather than a trusted
+ *   `mcp.json` on disk, which is what lets a GitHub Action register servers
+ *   from an input without project trust.
+ *
+ * @param config - Resource loader config carrying the tool/MCP toggles.
+ * @returns The extension factories to append, in load order.
+ */
+export function buildBuiltinAgentExtensions(config?: ResourceLoaderConfig): ExtensionFactory[] {
+  const hasMcpServers = config?.mcpServers ? Object.keys(config.mcpServers).length > 0 : false;
+  const factories: ExtensionFactory[] = [];
+
+  if (config?.enableCodemode || hasMcpServers) {
+    factories.push(createCodemodeExtension({ mode: 'on' }));
+  }
+  // Loaded alongside codemode whenever MCP servers are configured because the
+  // SDK activates whichever tool a server's `exposure` needs (`codemode` for
+  // `codemode`, `tool_search` for `deferred`). Gating on the configured
+  // exposure would mean duplicating the SDK's per-tool override logic.
+  if (config?.enableToolSearch || hasMcpServers) {
+    factories.push(createToolSearchExtension());
+  }
+  if (hasMcpServers) {
+    // Bind rather than wrap so the (tested) builder is the callback body.
+    factories.push(createMcpExtension({ loadConfig: buildMcpLoadConfig.bind(undefined, config) }));
+  }
+
+  return factories;
+}
+
+/**
  * Build the resource loader options (without creating or reloading the loader).
  *
  * Useful when the caller needs the options to pass to
@@ -129,10 +201,11 @@ export async function buildResourceLoaderOptions(
     config?.cwd
   );
 
-  const extensionFactories = [createLoggingFactory(logger, extensionInfo)];
+  const extensionFactories: ExtensionFactory[] = [createLoggingFactory(logger, extensionInfo)];
   if (loadBuiltinExtensions) {
     extensionFactories.unshift(createToolsFactory(provider, config));
   }
+  extensionFactories.push(...buildBuiltinAgentExtensions(config));
 
   return {
     extensionFactories,

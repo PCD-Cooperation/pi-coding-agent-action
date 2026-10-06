@@ -19,6 +19,12 @@ import { formatThreadAsText } from './common';
 import type { IssueOrPRThread, GetIssueOrPRThreadParams, PlatformProvider } from '../../platform';
 import type { AgentToolResult } from '@earendil-works/pi-coding-agent';
 import { withCancellation, isPresent } from './tool-execution';
+import {
+  PI_ACTION_NAMESPACE,
+  READ_ONLY_ANNOTATIONS,
+  threadOutputSchema,
+  toStructuredContent,
+} from './metadata';
 
 /**
  * Schema for the get_issue_or_pr_thread tool.
@@ -94,6 +100,9 @@ export function getIssueOrPRThreadToolFactory(provider: PlatformProvider) {
     promptGuidelines: GET_ISSUE_PR_THREAD_PROMPT_GUIDELINES(provider.type),
     parameters: getIssueOrPRThreadSchema,
     constrainedSampling: PREFER_STRICT_JSON_SCHEMA,
+    namespace: PI_ACTION_NAMESPACE,
+    annotations: READ_ONLY_ANNOTATIONS,
+    outputSchema: threadOutputSchema,
     execute: withCancellation({
       cancellationMessage: CANCELLATION_MESSAGE_GET_THREAD,
       cancellationDetails: {
@@ -121,6 +130,7 @@ export function getIssueOrPRThreadToolFactory(provider: PlatformProvider) {
         ...(isPresent(params.issue_number) ? { issue_number: params.issue_number } : {}),
         ...(isPresent(params.max_comments) ? { max_comments: params.max_comments } : {}),
       }),
+      structuredContent: toStructuredContent,
       execute: async (params: GetIssueOrPRThreadParams) => {
         const result = await provider.getIssueOrPRThread(params);
 

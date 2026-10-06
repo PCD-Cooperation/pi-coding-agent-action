@@ -28,3 +28,4 @@ allowBuilds:
 # version churn with no maintenance. Third-party packages keep the cooldown.
 minimumReleaseAgeExclude:
   - '@earendil-works/*'
+  - pi-subagents@0.76.1

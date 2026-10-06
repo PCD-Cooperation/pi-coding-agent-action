@@ -6,7 +6,7 @@ branding:
 
 inputs:
   github_token:
-    description: 'GitHub token for API access. The default `GITHUB_TOKEN` works for all standard operations. To use `share_session`, provide a classic PAT (`gist` scope), fine-grained PAT (Account → Gists: read/write), or GitHub App token instead — the default `GITHUB_TOKEN` cannot create gists.'
+    description: 'GitHub token for API access. The default `GITHUB_TOKEN` works for all standard operations. To use `share_session`, provide a classic PAT (`gist` scope), fine-grained PAT (Account → Gists: read/write), or GitHub App token instead — the default `GITHUB_TOKEN` cannot create gists. To open pull requests from the agent''s own fork, a personal access token needs to be classic PAT with `repo` scope, or a fine-grained PAT with repository read/write + fork permissions.'
     required: true
 
   provider:
@@ -53,6 +53,31 @@ inputs:
     description: "Controls which tools are loaded into the session. Defaults to 'all' which loads all available tools (built-in + custom). Accepts a list of tool names (one per line) to load only those tools. Tool names must match exactly — unknown names cause the run to fail early."
     required: false
     default: 'all'
+
+  enable_review_subagents:
+    description: 'Enable bounded background PR review children using pinned pi-subagents 0.76.1, the same in-memory Copilot OAuth, gpt-6-luna/high, read-only tools and codemode. The cumulative child limit is set by max_review_subagents.'
+    required: false
+    default: 'false'
+
+  max_review_subagents:
+    description: 'Maximum total review children per session, including failures. Positive integer; defaults to 3. Does not enable delegation by itself. The pinned executor runs at most 4 children simultaneously.'
+    required: false
+    default: '3'
+
+  enable_codemode:
+    description: 'Enable the built-in `codemode` tool: the agent writes JavaScript that orchestrates tools (including MCP tools) in parallel and can reduce large results before they reach the model, cutting prompt tokens on tool-heavy tasks. `codemode` is also activated automatically when an MCP server with `codemode` exposure connects. Note: an explicit `loaded_tools` allowlist must include `codemode` for it to be active.'
+    required: false
+    default: 'false'
+
+  enable_tool_search:
+    description: 'Enable the built-in `tool_search` tool, which loads tools with `deferred` exposure (typically MCP servers) into the model''s tool set on demand. Also activated automatically when an MCP server with `deferred` exposure connects. Note: an explicit `loaded_tools` allowlist must include `tool_search` for it to be active.'
+    required: false
+    default: 'false'
+
+  mcp_servers:
+    description: 'MCP servers to connect, as a JSON object. Either `{"<name>": {"command": "...", "args": [...]}}` for stdio or `{"<name>": {"url": "https://..."}}` for streamable HTTP. The `mcp.json` shape `{"mcpServers": {...}, "autoEnableCodemode": true}` is also accepted. String values (headers, env) may reference environment variables as `${NAME}` (resolved from the step''s `env:`; a reference to an unset variable fails the run). Prefer headers/env for credentials — args values are not masked. Configuring any server also loads the codemode, tool_search, and MCP extensions; codemode/tool_search are activated per each server''s exposure.'
+    required: false
+    default: ''
 
   diff_max_lines:
     description: 'Maximum number of diff lines returned by the get_pr_diff tool. Defaults to 1000.'
@@ -119,10 +144,25 @@ inputs:
     required: false
     default: 'false'
 
+  cache_warming:
+    description: 'Prompt cache-warming mode. Keeps expensive prompt-cache prefixes alive with cost-aware one-token refreshes so pauses (e.g. long tool runs) don''t pay full input price again. One of `off`, `streaming` (refresh during long tool executions; the default), or `idle` (also refresh between prompts). Refreshes are billed as a cache read plus one output token and only fire when expected savings exceed the cost.'
+    required: false
+    default: ''
+
+  refresh_model_catalog:
+    description: 'Whether to refresh the provider''s model catalog from pi.dev at startup so models newer than the bundled SDK resolve. Set to `false` to skip the network round-trip and shorten boot time (the bundled model list is used instead).'
+    required: false
+    default: 'true'
+
   pr_number:
     description: 'Pull request number to target. Use this with workflow_dispatch to run the agent on a specific PR without a triggering event. When set, the action fetches PR context and posts the result as a comment on the specified PR.'
     required: false
     default: ''
+
+  publish_comment:
+    description: 'Publish the final result as a PR/issue comment. Set false for a pilot that only returns action outputs.'
+    required: false
+    default: 'true'
 
   update_comment:
     description: 'Whether to update/overwrite the bot''s previous comment on the issue/PR instead of creating a new one.'

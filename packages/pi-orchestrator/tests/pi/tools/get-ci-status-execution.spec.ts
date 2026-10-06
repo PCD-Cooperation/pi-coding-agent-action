@@ -149,16 +149,20 @@ describe('get_ci_status tool - execution', () => {
     expect(callParams.pull_number).toBeUndefined();
   });
 
-  test('execute propagates provider errors', async () => {
+  test('execute returns an isError result on provider errors', async () => {
     const getCIStatus = vi.fn(async () => {
       throw new Error('API rate limit exceeded');
     });
     const provider = createMockProvider({ getCIStatus }, providerOptions);
     const tool = getCIStatusToolFactory(provider);
 
-    await expect(tool.execute('call-error', {}, undefined, undefined, mockCtx)).rejects.toThrow(
-      'API rate limit exceeded'
-    );
+    const result = await tool.execute('call-error', {}, undefined, undefined, mockCtx);
+    expect(result.isError).toBe(true);
+    expect(result.content[0]).toEqual({
+      type: 'text',
+      text: 'Tool execution failed: API rate limit exceeded',
+    });
+    expect(result.structuredContent).toEqual({ error: 'API rate limit exceeded' });
   });
 
   test('execute returns cancellation result when signal is aborted', async () => {

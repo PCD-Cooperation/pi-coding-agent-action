@@ -10,6 +10,8 @@ import type {
   AgentToolUpdateCallback,
   ExtensionContext,
 } from '@earendil-works/pi-coding-agent';
+import { toStructuredContent } from './metadata';
+import type { JsonValue } from '@earendil-works/pi-ai';
 
 /**
  * Type guard: true when `value` is neither `null` nor `undefined`.
@@ -50,8 +52,23 @@ export interface ToolExecutionConfig<TParams, TDetails, TResult> {
   cancellationDetails: Omit<TDetails, 'cancelled'>;
   /** Function that validates and transforms tool parameters into execution params. */
   prepareParams: (params: TParams) => TResult;
-  /** Function that executes the actual operation. */
-  execute: (params: TResult) => Promise<AgentToolResult<TDetails>>;
+  /** Function that executes the actual operation. The tool context is
+   * provided for composite tools that orchestrate other tools via
+   * `ctx.executeTool()`. */
+  execute: (params: TResult, ctx: ExtensionContext) => Promise<AgentToolResult<TDetails>>;
+  /**
+   * Maps a successful (or cancelled) result's details to the tool's
+   * `structuredContent` (machine-readable result for programmatic callers
+   * such as codemode scripts). When provided, every non-error result carries
+   * `structuredContent`.
+   */
+  structuredContent?: (details: TDetails) => JsonValue;
+  /**
+   * Builds the `details` payload for error results (returned with
+   * `isError: true` instead of throwing). Defaults to a zeroed copy of
+   * {@link ToolExecutionConfig.cancellationDetails}.
+   */
+  errorDetails?: (error: unknown) => TDetails;
 }
 
 /**
@@ -72,11 +89,28 @@ export function createCancellationResult<TDetails>(
 }
 
 /**
- * Create a tool execute function with built-in cancellation handling.
+ * Attach `structuredContent` to a result when the tool declares a mapper.
+ */
+function withStructuredContent<TParams, TDetails, TResult>(
+  config: ToolExecutionConfig<TParams, TDetails, TResult>,
+  result: AgentToolResult<TDetails>
+): AgentToolResult<TDetails> {
+  if (!config.structuredContent) {
+    return result;
+  }
+  return { ...result, structuredContent: config.structuredContent(result.details) };
+}
+
+/**
+ * Create a tool execute function with built-in cancellation and error handling.
  *
- * Wraps the provided execution logic with a cancellation check at the start.
- * If the signal is aborted, returns a cancellation result. Otherwise, delegates
- * to the prepareParams and execute functions.
+ * Wraps the provided execution logic with:
+ * - a cancellation check at the start (returns a cancellation result when the
+ *   signal is already aborted),
+ * - `structuredContent` decoration for programmatic callers (when configured),
+ * - an error boundary that reports failures with `isError: true` instead of
+ *   throwing, so the model sees the error but `details`/`structuredContent`
+ *   stay available to the UI and scripts.
  *
  * @param config - Configuration for the tool execution.
  * @returns An execute function compatible with defineTool.
@@ -115,11 +149,28 @@ export function withCancellation<TParams, TDetails, TResult>(
     _ctx: ExtensionContext
   ): Promise<AgentToolResult<TDetails>> => {
     if (signal?.aborted) {
-      return createCancellationResult(config.cancellationMessage, config.cancellationDetails);
+      return withStructuredContent(
+        config,
+        createCancellationResult(config.cancellationMessage, config.cancellationDetails)
+      );
     }
 
-    const executionParams = config.prepareParams(params);
-    return config.execute(executionParams);
+    try {
+      const executionParams = config.prepareParams(params);
+      const result = await config.execute(executionParams, _ctx);
+      return withStructuredContent(config, result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const details = config.errorDetails
+        ? config.errorDetails(error)
+        : ({ ...config.cancellationDetails } as TDetails);
+      return {
+        content: [{ type: 'text' as const, text: `Tool execution failed: ${message}` }],
+        details,
+        structuredContent: toStructuredContent({ error: message }),
+        isError: true,
+      };
+    }
   };
 }
 

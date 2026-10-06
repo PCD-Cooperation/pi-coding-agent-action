@@ -88,9 +88,11 @@ export const CREATE_PULL_REQUEST_PROMPT_GUIDELINES = [
   'Always use the create_pull_request tool to create pull requests - do not use git commands or gh CLI directly.',
   'Make sure your changes are made (modified files exist) before calling this tool. The tool will detect changes, create branch, and create PR automatically. Do NOT use unless you have already applied changes and/or added new files.',
   'The tool will automatically generate a branch name in the format: pi/issue{number}-{timestamp}.',
+  "If the tool fails to push to the repository because of insufficient permissions, it will open a PR from a fork: create a fork (if it doesn't exist); push the PR branch to fork; create a PR from the branch in the fork.",
   'Do NOT provide the "base" parameter unless the user explicitly requests a different target branch than the repository default. The tool will automatically detect the correct default branch.',
   'Use dryRun=true first to verify the PR configuration, then dryRun=false to create it.',
   'On some platforms (e.g. Forgejo) the PR object cannot always be opened automatically even though the branch is pushed. When this happens the tool returns a compare URL instead of an error — post that URL so the user can open the PR manually.',
+  'If the tool fails with an error about creating a fork, the configured token cannot own forks (e.g. the default GITHUB_TOKEN authenticates as a bot). Report that a personal access token with repository access is required for fork-based pull requests.',
 ];
 
 /**
@@ -328,7 +330,7 @@ export function GET_CI_STATUS_PROMPT_GUIDELINES(platform: PlatformType = 'github
   const product = productNameOf(platform);
   return [
     'Use get_ci_status to inspect the CI/CD status of a pull request or commit before or after making changes.',
-    `By default, the tool fetches status for the current PR from the ${product} context. Only provide owner/repo/pull_number when you need to check a different PR.`,
+    `By default, the tool fetches status for the head commit of the current PR from the ${product} context. Outside a PR, it uses the commit that triggered the run. Only provide owner/repo/pull_number when you need to check a different PR.`,
     'You can also provide a `ref` (commit SHA or branch name) directly instead of a pull_number.',
     'Filter by `status` (queued, in_progress, completed) or `conclusion` (success, failure, cancelled, timed_out) to narrow results.',
     'For failed workflow runs, use the returned run_id with the `get_workflow_run_logs` tool to fetch detailed job logs and diagnose failures.',
@@ -388,3 +390,60 @@ export const GET_WORKFLOW_RUN_LOGS_PARAM_RUN_ID_DESCRIPTION =
 
 export const GET_WORKFLOW_RUN_LOGS_PARAM_MAX_BYTES_DESCRIPTION =
   'Maximum total log bytes to return. Defaults to 51200 (50KB). Capped at 1048576 (1MB). Use for limiting very large log outputs.';
+
+//
+// Summarize Text
+//
+export const SUMMARIZE_TEXT_PROMPT_SNIPPET =
+  'Summarize long text with a separate LLM call, keeping the full text out of your own context. Use it to condense very long inputs (CI logs, big threads, large file dumps) before analyzing them.';
+
+export const SUMMARIZE_TEXT_PROMPT_GUIDELINES = [
+  'Use summarize_text when a text is too long to read in full (e.g. workflow logs, large comment threads) and you only need the key points.',
+  'Pass the raw text via `text` and optionally narrow the result with `focus` (e.g. "errors and their root causes") and `max_words`.',
+  'The summary is produced by a separate one-shot LLM call using the current session model; it does not consume your context window beyond the returned summary.',
+];
+
+export const SUMMARIZE_TEXT_DESCRIPTION =
+  'Summarize a long text with a separate one-shot LLM call (using the current session model) and return only the summary. Use this to condense very large inputs — CI logs, long threads, file dumps — without loading them fully into the conversation.';
+
+export const SUMMARIZE_TEXT_PARAM_TEXT_DESCRIPTION =
+  'The raw text to summarize. Can be very long; it is sent to the sub-call, not kept in your context.';
+
+export const SUMMARIZE_TEXT_PARAM_FOCUS_DESCRIPTION =
+  'Optional instruction for what the summary should focus on (e.g. "errors, root causes, and failed steps").';
+
+export const SUMMARIZE_TEXT_PARAM_MAX_WORDS_DESCRIPTION =
+  'Approximate maximum length of the summary in words. Defaults to 300.';
+
+//
+// Diagnose CI Failure
+//
+export const DIAGNOSE_CI_FAILURE_PROMPT_SNIPPET =
+  'Diagnose CI failures in one step: fetches CI status, pulls the logs of failed workflow runs, and returns an LLM-summarized root-cause analysis.';
+
+export const DIAGNOSE_CI_FAILURE_PROMPT_GUIDELINES = [
+  'Use diagnose_ci_failure to investigate failing CI in a single call instead of chaining get_ci_status → get_workflow_run_logs → summarize_text manually.',
+  'Prefer this tool when CI is already known to be failing; use get_ci_status first when you only need to know whether CI passed.',
+  'Use `focus` to steer the analysis (e.g. "why did the lint job fail"). Use `max_words` to bound the summary length.',
+];
+
+export const DIAGNOSE_CI_FAILURE_DESCRIPTION =
+  'Diagnose CI failures for a pull request or commit ref in a single call. Fetches the CI status, retrieves the logs of failed workflow runs, and returns a concise root-cause summary produced by a separate LLM sub-call. Returns the passing status without logs when CI is green.';
+
+export const DIAGNOSE_CI_FAILURE_PARAM_OWNER_DESCRIPTION =
+  'Repository owner (e.g., "octocat"). If not provided, uses the current repository from context.';
+
+export const DIAGNOSE_CI_FAILURE_PARAM_REPO_DESCRIPTION =
+  'Repository name (e.g., "hello-world"). If not provided, uses the current repository from context.';
+
+export const DIAGNOSE_CI_FAILURE_PARAM_PULL_NUMBER_DESCRIPTION =
+  'Pull request number. If not provided, uses the current PR from context. Alternative to providing a ref.';
+
+export const DIAGNOSE_CI_FAILURE_PARAM_REF_DESCRIPTION =
+  'Git ref (commit SHA or branch name) to check. If not provided, resolved from pull_number or context.';
+
+export const DIAGNOSE_CI_FAILURE_PARAM_FOCUS_DESCRIPTION =
+  'Optional instruction for what the failure analysis should focus on (e.g. "the failing test names and their assertions").';
+
+export const DIAGNOSE_CI_FAILURE_PARAM_MAX_WORDS_DESCRIPTION =
+  'Approximate maximum length of the failure summary in words. Defaults to 300.';

@@ -35,4 +35,31 @@ describe('bundled OAuth flows', () => {
 
     expect(JSON.parse(stdout)).toEqual({ apiKey: 'bundled-access-token' });
   });
+
+  test('renews Copilot OAuth concurrently from a standalone bundle', async () => {
+    const outputDir = mkdtempSync(join(tmpdir(), 'pi-action-bundled-copilot-'));
+    tempDirs.push(outputDir);
+    const bundlePath = join(outputDir, 'index.cjs');
+    await build({
+      entryPoints: [join(import.meta.dirname, 'fixtures/bundled-copilot-entry.ts')],
+      bundle: true,
+      platform: 'node',
+      target: 'node24',
+      format: 'cjs',
+      define: { 'import.meta.url': 'importMetaUrl' },
+      inject: [join(import.meta.dirname, '../src/import-meta-url.js')],
+      outfile: bundlePath,
+    });
+    const stdout = execFileSync(process.execPath, [bundlePath], {
+      cwd: outputDir,
+      encoding: 'utf8',
+      env: { ...process.env, PI_OFFLINE: '1', PI_CODING_AGENT_DIR: outputDir },
+    });
+    expect(JSON.parse(stdout)).toEqual({
+      exchanges: 2,
+      baseUrl: 'https://api.business.githubcopilot.com',
+      renewed: true,
+      masked: true,
+    });
+  });
 });
