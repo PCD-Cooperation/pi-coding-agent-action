@@ -399,6 +399,15 @@ export function gatherActionsConfig(): PiConfig {
   const diffMaxLines = parsePositiveIntInput(core.getInput('diff_max_lines'));
   const diffMaxBytes = parsePositiveIntInput(core.getInput('diff_max_bytes'));
   const prNumber = parsePositiveIntInput(core.getInput('pr_number'));
+  const maxReviewSubagentsRaw = core.getInput('max_review_subagents').trim();
+  const maxReviewSubagents = maxReviewSubagentsRaw ? Number(maxReviewSubagentsRaw) : 3;
+  if (
+    !/^\d+$/.test(maxReviewSubagentsRaw || '3') ||
+    !Number.isSafeInteger(maxReviewSubagents) ||
+    maxReviewSubagents < 1
+  ) {
+    throw new Error('max_review_subagents must be a positive safe integer.');
+  }
 
   // --- Session sharing inputs --------------------------------------------
   const githubToken = core.getInput('github_token') || undefined;
@@ -413,6 +422,7 @@ export function gatherActionsConfig(): PiConfig {
     provider,
     model,
     token,
+    maxReviewSubagents,
     publishComment: parseBooleanInput(core.getInput('publish_comment'), true),
     ...(copilotOAuthToken ? { copilotOAuthToken } : {}),
     thinkingLevel,

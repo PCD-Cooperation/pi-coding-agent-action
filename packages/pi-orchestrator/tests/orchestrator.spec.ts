@@ -258,6 +258,18 @@ describe('ActionOrchestrator', () => {
       });
     });
 
+    test('passes the configured review child budget to the agent', async () => {
+      const orchestrator = createOrchestrator({
+        enableReviewSubagents: true,
+        maxReviewSubagents: 5,
+      });
+      await orchestrator.execute();
+      expectFactoryCalledWith(mockPiFactory, mockCore, mockProvider, {
+        enableReviewSubagents: true,
+        maxReviewSubagents: 5,
+      });
+    });
+
     test('sends prompt to Pi agent', async () => {
       const getPromptMock = vi.fn(async () => 'Write unit tests for this function');
       mockGit.getPrompt = getPromptMock as any;

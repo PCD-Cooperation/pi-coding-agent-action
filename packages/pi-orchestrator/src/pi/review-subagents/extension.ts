@@ -36,9 +36,11 @@ export function reviewSubagentsFactory(
   entry: string,
   runtime: sdk.ModelRuntime,
   onCoordinator: (coordinator: ReviewCoordinator) => void,
-  onReminder: () => void = () => undefined
+  onReminder: () => void = () => undefined,
+  maxChildren = 3
 ): ExtensionFactory {
   return async pi => {
+    const coordinator = new ReviewCoordinator(maxChildren);
     const configDir = join(sdk.getAgentDir(), 'extensions/subagent');
     const configPath = join(configDir, 'config.json');
     if (!existsSync(configPath)) {
@@ -52,9 +54,9 @@ export function reviewSubagentsFactory(
           forceTopLevelAsync: false,
           fleetView: false,
           asyncWidget: false,
-          maxSubagentSpawnsPerSession: 3,
-          maxSubagentSpawnsPerRun: 3,
-          globalConcurrencyLimit: 3,
+          maxSubagentSpawnsPerSession: maxChildren,
+          maxSubagentSpawnsPerRun: maxChildren,
+          globalConcurrencyLimit: maxChildren,
           intercomBridge: { mode: 'off' },
         }),
         { flag: 'wx', mode: 0o600 }
@@ -62,13 +64,24 @@ export function reviewSubagentsFactory(
     }
     const settings = JSON.parse(readFileSync(configPath, 'utf8')) as {
       disabledFeatures?: string[];
+      maxSubagentSpawnsPerSession?: number;
+      maxSubagentSpawnsPerRun?: number;
+      globalConcurrencyLimit?: number;
     };
     if (!settings.disabledFeatures?.includes('workflow-scripts')) {
       throw new Error(
         'Review children require workflow-scripts disabled in the dedicated Pi agent directory. Existing configuration was preserved.'
       );
     }
-    const coordinator = new ReviewCoordinator();
+    if (
+      settings.maxSubagentSpawnsPerSession !== maxChildren ||
+      settings.maxSubagentSpawnsPerRun !== maxChildren ||
+      settings.globalConcurrencyLimit !== maxChildren
+    ) {
+      throw new Error(
+        'Review child configuration does not match max_review_subagents. Use a fresh dedicated PI_CODING_AGENT_DIR; existing configuration was preserved.'
+      );
+    }
     onCoordinator(coordinator);
     // Use the host modules, not a second SDK/auth store from a temporary npm installation.
     const jiti = createJiti(entry, {
@@ -154,15 +167,14 @@ export function reviewSubagentsFactory(
       name: 'subagent',
       exposure: 'model-only',
       label: 'Delegate focused review',
-      description:
-        'Start a batch of 1 to 3 read-only gpt-6-luna/high review children in parallel. Default to reviewing alone; delegate only an independent, concrete scope. At most 3 children per review. Returns immediately so you can keep reviewing. Use wait_subagents to collect all findings before the final report. Children cannot delegate.',
+      description: `Start a batch of 1 to ${maxChildren} read-only gpt-6-luna/high review children. Default to reviewing alone; delegate only an independent, concrete scope. At most ${maxChildren} children per review, including failed calls; at most 4 run simultaneously. Returns immediately so you can keep reviewing. Use wait_subagents to collect all findings before the final report. Children cannot delegate.`,
       parameters: Type.Object({
         tasks: Type.Array(
           Type.Object({
             task: Type.String({ minLength: 1 }),
             scope: Type.String({ minLength: 1 }),
           }),
-          { minItems: 1, maxItems: 3 }
+          { minItems: 1, maxItems: maxChildren }
         ),
       }),
       execute: async (id, params, signal, _update, ctx) => {

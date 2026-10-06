@@ -178,7 +178,8 @@ export class Agent {
           },
           () => {
             this.outputChunks = [];
-          }
+          },
+          this.config.maxReviewSubagents ?? 3
         )
       );
     }

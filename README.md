@@ -484,10 +484,18 @@ Include `subagent` and `wait_subagents` in an explicit `loaded_tools` list.
 Enable `enable_codemode: true` and include `codemode` for the parent reviewer.
 
 The parent defaults to reviewing alone and chooses whether to delegate. `subagent`
-accepts `tasks: [{scope, task}, ...]` and starts one parallel batch of 1–3 children,
+accepts `tasks: [{scope, task}, ...]` and starts one batch within the configured child limit,
 returning immediately so the parent can continue independent review. Collect the
 batch with `wait_subagents` before starting another batch or publishing the final
-report. The cumulative budget is three children per session, including failures.
+report. Set `max_review_subagents` to a positive integer (default `3`) to change the
+cumulative budget per session, including failures. The pinned executor runs at
+most four children simultaneously; larger batches are queued within that limit.
+This input does not enable delegation by itself.
+
+```yaml
+enable_review_subagents: true
+max_review_subagents: 3
+```
 
 Children use `github-copilot/gpt-6-luna:high`, the parent's in-memory OAuth runtime,
 and only `read`, `grep`, `find`, `ls`, and the SDK's official `codemode` extension.
@@ -498,7 +506,8 @@ hard tool budget. Child usage is added exactly once when results are collected.
 Use a dedicated temporary `PI_CODING_AGENT_DIR` in CI. On first use, the adapter
 creates a private `extensions/subagent/config.json` with the package's documented
 `workflow-scripts` feature disabled to expose bounded parallel task batches.
-An existing incompatible config fails without being overwritten. Package-owned
+An existing incompatible config, including mismatched child limits, fails
+without being overwritten; use a fresh temporary directory when changing limits. Package-owned
 sessions and timers are shut down before the action exits. A review with
 uncollected child findings fails instead of publishing a clean result.
 

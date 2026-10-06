@@ -186,7 +186,13 @@ async function main() {
     agentsFilesOverride: () => ({ agentsFiles: [] }),
     extensionFactories: [
       createCodemodeExtension({ mode: 'on' }),
-      reviewSubagentsFactory(process.env.SUBAGENT_ENTRY!, runtime, () => undefined),
+      reviewSubagentsFactory(
+        process.env.SUBAGENT_ENTRY!,
+        runtime,
+        () => undefined,
+        () => undefined,
+        4
+      ),
     ],
   });
   await loader.reload();

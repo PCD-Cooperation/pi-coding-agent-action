@@ -166,6 +166,20 @@ describe('gatherActionsConfig', () => {
       expect(gatherActionsConfig().enableReviewSubagents).toBe(true);
       expect(gatherActionsConfig().publishComment).toBe(false);
     });
+    test('review child limit defaults to three and accepts a custom limit', () => {
+      expect(gatherActionsConfig().maxReviewSubagents).toBe(3);
+      mockCore({ max_review_subagents: '5' });
+      expect(gatherActionsConfig().maxReviewSubagents).toBe(5);
+    });
+
+    test.each(['0', '-1', '1.5', '3children', 'Infinity', '9007199254740992'])(
+      'rejects invalid review child limit %s',
+      raw => {
+        mockCore({ max_review_subagents: raw });
+        expect(() => gatherActionsConfig()).toThrow('max_review_subagents');
+      }
+    );
+
     test('enable_codemode defaults to false and omits the key', () => {
       expect(gatherActionsConfig().enableCodemode).toBeUndefined();
     });

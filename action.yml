@@ -55,9 +55,14 @@ inputs:
     default: 'all'
 
   enable_review_subagents:
-    description: 'Enable bounded background PR review children using pinned pi-subagents 0.76.1, the same in-memory Copilot OAuth, gpt-6-luna/high, read-only tools and codemode. At most 3 children per session.'
+    description: 'Enable bounded background PR review children using pinned pi-subagents 0.76.1, the same in-memory Copilot OAuth, gpt-6-luna/high, read-only tools and codemode. The cumulative child limit is set by max_review_subagents.'
     required: false
     default: 'false'
+
+  max_review_subagents:
+    description: 'Maximum total review children per session, including failures. Positive integer; defaults to 3. Does not enable delegation by itself. The pinned executor runs at most 4 children simultaneously.'
+    required: false
+    default: '3'
 
   enable_codemode:
     description: 'Enable the built-in `codemode` tool: the agent writes JavaScript that orchestrates tools (including MCP tools) in parallel and can reduce large results before they reach the model, cutting prompt tokens on tool-heavy tasks. `codemode` is also activated automatically when an MCP server with `codemode` exposure connects. Note: an explicit `loaded_tools` allowlist must include `codemode` for it to be active.'

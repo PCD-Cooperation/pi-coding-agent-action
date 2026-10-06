@@ -217,6 +217,8 @@ export interface ResourceLoaderConfig extends DiffConfig {
   enableCodemode?: boolean;
   /** Enable bounded background review children using the native Copilot runtime. */
   enableReviewSubagents?: boolean;
+  /** Cumulative child limit per review, including failures. Defaults to 3. */
+  maxReviewSubagents?: number;
   /**
    * Enable the built-in `tool_search` tool, which loads tools with `deferred`
    * exposure (typically MCP servers) into the model's declarations on demand.
@@ -263,6 +265,8 @@ export interface PiConfig extends DiffConfig {
   enableCodemode?: boolean;
   /** Enable bounded background review children using the native Copilot runtime. */
   enableReviewSubagents?: boolean;
+  /** Cumulative child limit per review, including failures. Defaults to 3. */
+  maxReviewSubagents?: number;
   /** Enable the built-in `tool_search` tool (load `deferred`-exposure tools on demand). */
   enableToolSearch?: boolean;
   /** MCP servers to register for the session, keyed by server name. */

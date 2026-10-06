@@ -87,3 +87,25 @@ test('shutdown aborts outstanding work and permanently closes admissions', async
   expect(cancelled).toHaveBeenCalledOnce();
   expect(() => coordinator.start(async () => result)).toThrow();
 });
+
+test('custom cumulative limit counts failed children across batches', async () => {
+  const coordinator = new ReviewCoordinator(5);
+  coordinator.start(async () => {
+    throw new Error('child failed');
+  }, 3);
+  await coordinator.collect();
+  coordinator.start(async () => result, 2);
+  await coordinator.collect();
+  expect(() => coordinator.start(async () => result)).toThrow('at most 5');
+  await coordinator.close();
+});
+
+test('a limit of one rejects parallel fanout before starting children', async () => {
+  const coordinator = new ReviewCoordinator(1);
+  const execute = vi.fn(async () => result);
+  expect(() => coordinator.start(execute, 2)).toThrow('at most 1');
+  expect(execute).not.toHaveBeenCalled();
+  coordinator.start(execute);
+  await coordinator.collect();
+  await coordinator.close();
+});

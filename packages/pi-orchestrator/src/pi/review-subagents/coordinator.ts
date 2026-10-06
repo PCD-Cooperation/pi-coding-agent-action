@@ -1,7 +1,6 @@
 import type { AgentToolResult } from '@earendil-works/pi-coding-agent';
 import type { Usage } from '@earendil-works/pi-ai';
 
-const MAX_REVIEW_SUBAGENTS = 3;
 export const CHILD_TIMEOUT_MS = 300_000;
 export const CHILD_TOOLS = ['read', 'grep', 'find', 'ls', 'codemode'];
 
@@ -20,13 +19,21 @@ export class ReviewCoordinator {
   private closed = false;
   private admitted = 0;
 
+  constructor(private readonly maxChildren = 3) {
+    if (!Number.isSafeInteger(maxChildren) || maxChildren < 1) {
+      throw new Error('max_review_subagents must be a positive safe integer.');
+    }
+  }
+
   get uncollected(): number {
     return this.jobs.filter(job => !job.collected).length;
   }
 
   start(execute: (signal: AbortSignal) => Promise<AgentToolResult<unknown>>, children = 1): string {
-    if (this.closed || this.admitted + children > MAX_REVIEW_SUBAGENTS) {
-      throw new Error('Review subagent budget exhausted: at most 3 children per review.');
+    if (this.closed || this.admitted + children > this.maxChildren) {
+      throw new Error(
+        `Review subagent budget exhausted: at most ${this.maxChildren} children per review.`
+      );
     }
     if (this.jobs.some(job => !job.settled)) {
       throw new Error(
