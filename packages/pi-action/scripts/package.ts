@@ -1,5 +1,6 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
-import { build, type Plugin } from 'esbuild';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { build } from 'esbuild';
+import { createRequire } from 'node:module';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolvePiSdkPackagePath } from './pi-sdk';
@@ -37,39 +38,22 @@ export {
  * from a temporary installation directory, where their Pi peer dependencies
  * cannot resolve back to the bundled host runtime.
  *
- * The SDK's embedded-module mode supplies its host virtual modules and the
- * static jiti transform. Select that mode for this standalone action bundle.
+ * The SDK already exposes those inlined modules through `VIRTUAL_MODULES` for
+ * Bun. Use the same mechanism for bundled Node.js instead of asking jiti to
+ * resolve packages from the temporary npm directory. `tryNative: false` keeps
+ * jiti from bypassing the map and loading a second copy from the filesystem.
  *
- * The SDK cannot identify our independently packaged action as its own bundled
- * Node distribution, so the build sets the loader's mode explicitly.
+ * This patch can be removed once the SDK uses virtual modules for bundled Node
+ * by default.
  */
-const SDK_LOADER_EMBEDDED_MODE = /const usesEmbeddedModules = isBunBinary \|\| isNodeSeaBinary \|\| isBundledNode;/;
-
-/** Apply the bundled Node extension-loader patch to SDK source. */
-export function patchSDKLoaderSource(source: string): string {
-  const patched = source.replace(
-    SDK_LOADER_EMBEDDED_MODE,
-    'const usesEmbeddedModules = true;'
-  );
-  if (patched === source) {
-    throw new Error(
-      '[patch-sdk-loader] Bundled Node extension loader pattern not matched; the SDK may have changed.'
-    );
-  }
-  return patched;
-}
-
-function patchSDKLoaderPlugin(): Plugin {
-  return {
-    name: 'patch-sdk-loader',
-    setup(build) {
-      build.onLoad({ filter: /extensions\/loader\.js$/ }, async args => ({
-        contents: patchSDKLoaderSource(readFileSync(args.path, 'utf-8')),
-        loader: 'js',
-      }));
-    },
-  };
-}
+/**
+ * Since pi-coding-agent 0.86.0 the SDK natively uses virtual modules (and
+ * `tryNative: false`) for bundled Node builds when the build-time
+ * `PI_BUNDLED_NODE` define is set — the same mechanism it already used for
+ * Bun binaries. Defining it here keeps jiti resolving npm extensions' Pi peer
+ * dependencies against the bundled host runtime instead of the temporary
+ * installation directory. (Replaces the former source patch of loader.js.)
+ */
 
 /**
  * Pi SDK runtime assets that must be copied to `dist/pi-sdk/` because they're
@@ -90,11 +74,7 @@ const SDK_ASSETS: ReadonlyArray<readonly [string, readonly string[]]> = [
  * Copy a single SDK asset directory, creating the destination as needed and
  * silently skipping missing source files. Exported for unit testing.
  */
-export function copySdkAssetDir(
-  srcDir: string,
-  destDir: string,
-  files: readonly string[]
-): void {
+export function copySdkAssetDir(srcDir: string, destDir: string, files: readonly string[]): void {
   if (!existsSync(srcDir)) return;
   mkdirSync(destDir, { recursive: true });
   for (const file of files) {
@@ -115,6 +95,63 @@ export function copyAllSdkAssets(sdkDistDir: string, piSdkDest: string): void {
   }
 }
 
+/**
+ * Path to the SDK's codemode worker entry inside an installed SDK `dist/`.
+ *
+ * The bundled action builds this as a separate entrypoint: the SDK's
+ * `getCodemodeWorkerSpecifier()` resolves `./codemode-worker.js` relative to
+ * the bundle, so it must sit next to `dist/index.js`.
+ */
+export function getCodemodeWorkerEntry(sdkDistDir: string): string {
+  return join(sdkDistDir, 'extensions', 'codemode', 'worker.js');
+}
+
+/**
+ * Copy the QuickJS wasm the codemode sandbox loads at runtime.
+ *
+ * The bundled SDK resolves it with
+ * `createRequire(dist/index.js).resolve("quickjs-wasi/quickjs.wasm")`. A normal
+ * install satisfies that through `node_modules`; the action has no runtime
+ * `node_modules`, so we recreate the minimal package layout under `dist/`.
+ *
+ * @param cwd - Repository root (the `dist/` parent).
+ * @param sdkPackageJsonPath - Absolute path to the SDK's `package.json`. The
+ *   require is created from there because `quickjs-wasi` is a dependency of the
+ *   SDK package, not hoisted to the workspace root under pnpm.
+ * @returns `true` when the wasm was found and copied, `false` when
+ *   `quickjs-wasi` is not installed (older SDKs without codemode).
+ */
+export function copyCodemodeAssets(cwd: string, sdkPackageJsonPath: string): boolean {
+  const require = createRequire(sdkPackageJsonPath);
+  let wasmPath: string;
+  let pkgPath: string;
+  try {
+    wasmPath = require.resolve('quickjs-wasi/quickjs.wasm');
+    pkgPath = require.resolve('quickjs-wasi/package.json');
+  } catch {
+    console.warn(
+      '[package] quickjs-wasi/quickjs.wasm not found; the codemode tool will be unavailable in this bundle'
+    );
+    return false;
+  }
+
+  const destDir = join(cwd, 'dist/node_modules/quickjs-wasi');
+  mkdirSync(destDir, { recursive: true });
+  copyFileSync(wasmPath, join(destDir, 'quickjs.wasm'));
+
+  // The resolved package is `type: module` with an `exports` map; expose only
+  // the wasm subpath so `createRequire(...).resolve()` accepts it.
+  const { name, version } = JSON.parse(readFileSync(pkgPath, 'utf-8')) as {
+    name: string;
+    version: string;
+  };
+  writeFileSync(
+    join(destDir, 'package.json'),
+    `${JSON.stringify({ name, version, exports: { './quickjs.wasm': './quickjs.wasm' } }, null, 2)}\n`
+  );
+  return true;
+}
+
 export async function buildDist(cwd: string = process.cwd()): Promise<void> {
   const baseVersion = readJsonVersion(join(cwd, 'package.json'));
   const version = composeActionVersion(baseVersion);
@@ -129,6 +166,13 @@ export async function buildDist(cwd: string = process.cwd()): Promise<void> {
     `[package] Building action v${version} (base: ${baseVersion}, branch: ${branch}, sha: ${sha})`
   );
 
+  const buildDefines = {
+    'import.meta.url': 'importMetaUrl',
+    __PI_CODING_AGENT_VERSION__: JSON.stringify(piVersion),
+    __VERSION__: JSON.stringify(version),
+    PI_BUNDLED_NODE: 'true',
+  };
+
   await build({
     entryPoints: [join(cwd, 'packages/pi-action/src/run.ts')],
     bundle: true,
@@ -137,20 +181,41 @@ export async function buildDist(cwd: string = process.cwd()): Promise<void> {
     outfile: join(cwd, 'dist/index.js'),
     format: 'cjs',
     minify: true,
-    plugins: [patchSDKLoaderPlugin()],
-    define: {
-      'import.meta.url': 'importMetaUrl',
-      __PI_CODING_AGENT_VERSION__: JSON.stringify(piVersion),
-      __VERSION__: JSON.stringify(version),
-    },
+    plugins: [],
+    define: buildDefines,
     inject: [join(cwd, 'packages/pi-action/src/import-meta-url.js')],
   });
 
-  // Clean previous SDK assets before copying the minimal set
+  // Build the codemode sandbox worker beside the main bundle. The SDK resolves
+  // `./codemode-worker.js` relative to `dist/index.js` in bundled Node builds.
+  const sdkDistDir = join(dirname(piPkgPath), 'dist');
+  const codemodeWorkerEntry = getCodemodeWorkerEntry(sdkDistDir);
+  if (existsSync(codemodeWorkerEntry)) {
+    await build({
+      entryPoints: [codemodeWorkerEntry],
+      bundle: true,
+      platform: 'node',
+      target: 'node24',
+      outfile: join(cwd, 'dist/codemode-worker.js'),
+      format: 'cjs',
+      minify: true,
+      define: buildDefines,
+      inject: [join(cwd, 'packages/pi-action/src/import-meta-url.js')],
+    });
+  } else {
+    console.warn(
+      `[package] codemode worker entry not found at ${codemodeWorkerEntry}; the codemode tool will be unavailable in this bundle`
+    );
+  }
+
+  // Clean previous SDK assets before copying the minimal set.
   const piSdkDir = join(cwd, 'dist/pi-sdk');
   if (existsSync(piSdkDir)) {
     rmSync(piSdkDir, { recursive: true, force: true });
   }
+
+  // Copy the QuickJS wasm the codemode sandbox loads at runtime.
+  copyCodemodeAssets(cwd, piPkgPath);
 
   // Copy only the Pi SDK assets that are read at runtime via getPackageDir().
   // The JS code is already fully inlined by esbuild — only non-code assets

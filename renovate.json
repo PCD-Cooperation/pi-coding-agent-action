@@ -1,13 +1,47 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended"],
-  "schedule": ["before 6am"],
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    ":semanticCommitTypeAll(chore)",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "timezone": "Europe/Zurich",
+  "schedule": ["* 5 * * 1"],
   "labels": ["dependencies", "automated"],
+  "gitAuthor": "Alexander Fortin <shaftoe@users.noreply.github.com>",
+  "rangeStrategy": "update-lockfile",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["* 5 * * 1"]
+  },
   "packageRules": [
+    {
+      "description": "Group all non-breaking devDependency updates into one PR",
+      "matchDepTypes": ["devDependencies"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "devDependencies (minor & patch)"
+    },
     {
       "description": "Group @earendil-works Pi SDK packages — they share a version scheme and should move together",
       "groupName": "Pi SDK",
-      "matchPackagePatterns": ["^@earendil-works/"]
+      "matchPackageNames": ["/^@earendil-works//"]
+    },
+    {
+      "description": "Group GitHub Actions updates",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "Separate PR for major updates of runtime-critical tooling",
+      "matchPackageNames": ["typescript", "eslint", "vitest", "esbuild"],
+      "matchUpdateTypes": ["major"],
+      "groupName": null
     }
-  ]
+  ],
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security"]
+  },
+  "osvVulnerabilityAlerts": true
 }

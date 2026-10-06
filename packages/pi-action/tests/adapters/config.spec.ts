@@ -110,6 +110,30 @@ describe('gatherActionsConfig', () => {
       const config = gatherActionsConfig();
       expect(config.autoCompaction).toBe(false);
     });
+
+    test('cacheWarming defaults to undefined (SDK default "streaming")', () => {
+      const config = gatherActionsConfig();
+      expect(config.cacheWarming).toBeUndefined();
+    });
+  });
+
+  describe('cache_warming parsing', () => {
+    test('parses cache_warming idle', () => {
+      mockCore({ cache_warming: 'idle' });
+      expect(gatherActionsConfig().cacheWarming).toBe('idle');
+    });
+
+    test('parses cache_warming case-insensitively and trims whitespace', () => {
+      mockCore({ cache_warming: '  OFF ' });
+      expect(gatherActionsConfig().cacheWarming).toBe('off');
+    });
+
+    test('warns and falls back to undefined on unknown value', () => {
+      mockCore({ cache_warming: 'aggressive' });
+      const config = gatherActionsConfig();
+      expect(config.cacheWarming).toBeUndefined();
+      expect(coreMock.warning).toHaveBeenCalledWith(expect.stringContaining('cache_warming'));
+    });
   });
 
   describe('boolean input parsing', () => {
@@ -131,6 +155,82 @@ describe('gatherActionsConfig', () => {
     test('parses auto_compaction true', () => {
       mockCore({ auto_compaction: 'true' });
       expect(gatherActionsConfig().autoCompaction).toBe(true);
+    });
+  });
+
+  describe('orchestration tools and MCP inputs', () => {
+    test('enable_codemode defaults to false and omits the key', () => {
+      expect(gatherActionsConfig().enableCodemode).toBeUndefined();
+    });
+
+    test('parses enable_codemode true', () => {
+      mockCore({ enable_codemode: 'true' });
+      expect(gatherActionsConfig().enableCodemode).toBe(true);
+    });
+
+    test('parses enable_tool_search true', () => {
+      mockCore({ enable_tool_search: 'true' });
+      expect(gatherActionsConfig().enableToolSearch).toBe(true);
+    });
+
+    test('omits MCP fields when mcp_servers is empty', () => {
+      mockCore({ mcp_servers: '' });
+      const config = gatherActionsConfig();
+      expect(config.mcpServers).toBeUndefined();
+      expect(config.mcpAutoEnableCodemode).toBeUndefined();
+    });
+
+    test('parses mcp_servers into a server map', () => {
+      mockCore({
+        mcp_servers: JSON.stringify({ docs: { url: 'https://example.com/mcp' } }),
+      });
+      expect(gatherActionsConfig().mcpServers).toEqual({
+        docs: { url: 'https://example.com/mcp' },
+      });
+    });
+
+    test('parses the mcp.json shape and forwards autoEnableCodemode', () => {
+      mockCore({
+        mcp_servers: JSON.stringify({
+          mcpServers: { docs: { url: 'https://example.com/mcp' } },
+          autoEnableCodemode: false,
+        }),
+      });
+      const config = gatherActionsConfig();
+      expect(config.mcpServers).toEqual({ docs: { url: 'https://example.com/mcp' } });
+      expect(config.mcpAutoEnableCodemode).toBe(false);
+    });
+
+    test('throws on malformed mcp_servers JSON', () => {
+      mockCore({ mcp_servers: '{not json' });
+      expect(() => gatherActionsConfig()).toThrow(/Invalid `mcp_servers` JSON/);
+    });
+
+    test('masks literal MCP header values, stdio env values, and OAuth client secrets', () => {
+      mockCore({
+        mcp_servers: JSON.stringify({
+          docs: {
+            url: 'https://example.com/mcp',
+            headers: { Authorization: 'Bearer abc123', 'X-Env': '${DOCS_TOKEN}' },
+          },
+          brave: {
+            command: 'npx',
+            env: { BRAVE_API_KEY: 'env-secret', REF_PATH: '${REF_PATH}' },
+          },
+          legacy: { command: 'server', oauth: { clientSecret: 'shh-secret' } },
+        }),
+      });
+      gatherActionsConfig();
+      expect(coreMock.setSecret).toHaveBeenCalledWith('Bearer abc123');
+      expect(coreMock.setSecret).toHaveBeenCalledWith('env-secret');
+      expect(coreMock.setSecret).toHaveBeenCalledWith('shh-secret');
+      expect(coreMock.setSecret).not.toHaveBeenCalledWith('${DOCS_TOKEN}');
+      expect(coreMock.setSecret).not.toHaveBeenCalledWith('${REF_PATH}');
+    });
+
+    test('rejects a server that sets both command and url', () => {
+      mockCore({ mcp_servers: JSON.stringify({ broken: { command: 'x', url: 'https://x' } }) });
+      expect(() => gatherActionsConfig()).toThrow(/both "command" and "url" set/);
     });
   });
 

@@ -16,6 +16,7 @@ import {
 } from '../prompt';
 import { CANCELLATION_MESSAGE_UPDATE_PR } from './constants';
 import { nullable, PREFER_STRICT_JSON_SCHEMA } from './schema';
+import { MUTATING_ANNOTATIONS, PI_ACTION_NAMESPACE } from './metadata';
 import type {
   UpdatePullRequestParams,
   UpdatePullRequestDetails,
@@ -74,6 +75,8 @@ export function updatePullRequestToolFactory(provider: PlatformProvider) {
     promptGuidelines: UPDATE_PULL_REQUEST_PROMPT_GUIDELINES(provider.type),
     parameters: updatePullRequestSchema,
     constrainedSampling: PREFER_STRICT_JSON_SCHEMA,
+    namespace: PI_ACTION_NAMESPACE,
+    annotations: MUTATING_ANNOTATIONS,
     execute: withCancellation({
       cancellationMessage: CANCELLATION_MESSAGE_UPDATE_PR,
       cancellationDetails: {

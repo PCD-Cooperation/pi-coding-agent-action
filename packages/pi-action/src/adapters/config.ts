@@ -18,11 +18,15 @@
  */
 
 import * as core from '@actions/core';
+import type { McpServerConfig } from '@earendil-works/pi-coding-agent';
 import type { OpengistExpiration, PiConfig } from '@alexanderfortin/pi-orchestrator';
 import {
   DEFAULT_OPENGIST_EXPIRATION,
   OPENGIST_EXPIRATIONS,
 } from '@alexanderfortin/pi-orchestrator';
+
+/** Valid values for the `cache_warming` input (mirrors the SDK's modes). */
+export const CACHE_WARMING_MODES = ['off', 'streaming', 'idle'] as const;
 
 // ---------------------------------------------------------------------------
 // Error message constants — keep stable; they are part of the public
@@ -125,6 +129,151 @@ export function parseGistExpiration(raw: string): OpengistExpiration | undefined
     : undefined;
 }
 
+/**
+ * Parse the `cache_warming` input into a prompt cache-warming mode.
+ *
+ * Returns `undefined` for empty input (the SDK then applies its default,
+ * `"streaming"`) and for unrecognised values (a warning is emitted by the
+ * caller so a typo doesn't silently change behavior). Case-insensitive.
+ */
+export function parseCacheWarmingMode(raw: string): PiConfig['cacheWarming'] {
+  const normalized = raw.trim().toLowerCase();
+  return (CACHE_WARMING_MODES as readonly string[]).includes(normalized)
+    ? (normalized as PiConfig['cacheWarming'])
+    : undefined;
+}
+
+/** Parsed result of the `mcp_servers` input. */
+export interface ParsedMcpServers {
+  /** Server configs keyed by name. */
+  servers: Record<string, McpServerConfig>;
+  /** Whether `codemode`-exposure servers auto-activate codemode. */
+  autoEnableCodemode?: boolean;
+}
+
+/** True when `value` is a non-null, non-array JSON object. */
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** Parse the raw input as a JSON object or throw a descriptive error. */
+function parseMcpJson(raw: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    // `JSON.parse` only throws `SyntaxError`; `String()` still renders it with
+    // its message while keeping coverage branch-free.
+    throw new Error(`Invalid \`mcp_servers\` JSON: ${String(error)}`);
+  }
+  if (!isJsonObject(parsed)) {
+    throw new Error('Invalid `mcp_servers`: expected a JSON object.');
+  }
+  return parsed;
+}
+
+/**
+ * Resolve the servers map from either the bare map or the `mcp.json` shape,
+ * reporting which shape was used (to read `autoEnableCodemode` only when wrapped).
+ */
+function extractMcpServers(root: Record<string, unknown>): {
+  rawServers: Record<string, unknown>;
+  wrapped: boolean;
+} {
+  // A bare map is already a validated JSON object, so only the wrapped shape
+  // can fail here.
+  if (!Object.prototype.hasOwnProperty.call(root, 'mcpServers')) {
+    return { rawServers: root, wrapped: false };
+  }
+  const rawServers = root.mcpServers;
+  if (!isJsonObject(rawServers)) {
+    throw new Error('Invalid `mcp_servers`: `mcpServers` must be a JSON object.');
+  }
+  return { rawServers, wrapped: true };
+}
+
+/** Validate one server entry selects exactly one transport (`command` or `url`). */
+function assertMcpServerEntry(name: string, config: unknown): void {
+  if (!isJsonObject(config)) {
+    throw new Error(`Invalid MCP server "${name}": expected a JSON object.`);
+  }
+  const hasCommand = typeof config.command === 'string';
+  const hasUrl = typeof config.url === 'string';
+  if (hasCommand && hasUrl) {
+    throw new Error(
+      `Invalid MCP server "${name}": both "command" and "url" set — pick one transport.`
+    );
+  }
+  if (!hasCommand && !hasUrl) {
+    throw new Error(
+      `Invalid MCP server "${name}": expected a "command" (stdio) or "url" (HTTP) field.`
+    );
+  }
+}
+
+/**
+ * Parse the `mcp_servers` input.
+ *
+ * Accepts either the bare servers map (`{"<name>": {...}}`) or the full
+ * `mcp.json` shape (`{"mcpServers": {...}, "autoEnableCodemode": true}`).
+ * Throws a descriptive error on malformed JSON or entries that are neither a
+ * stdio (`command`) nor an HTTP (`url`) server, so a typo fails fast instead of
+ * silently connecting nothing.
+ *
+ * Shape validation is intentionally shallow: the SDK validates the detailed
+ * per-transport fields when the server connects and reports those errors at
+ * startup.
+ */
+export function parseMcpServers(raw: string): ParsedMcpServers | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const root = parseMcpJson(trimmed);
+  const { rawServers, wrapped } = extractMcpServers(root);
+
+  for (const [name, config] of Object.entries(rawServers)) {
+    assertMcpServerEntry(name, config);
+  }
+
+  const autoEnableCodemode = wrapped ? root.autoEnableCodemode : undefined;
+  if (autoEnableCodemode !== undefined && typeof autoEnableCodemode !== 'boolean') {
+    throw new Error('Invalid `mcp_servers`: `autoEnableCodemode` must be a boolean.');
+  }
+
+  return {
+    servers: rawServers as Record<string, McpServerConfig>,
+    ...(autoEnableCodemode === undefined ? {} : { autoEnableCodemode }),
+  };
+}
+
+/**
+ * Register credential-bearing MCP fields as log secrets.
+ *
+ * HTTP `headers` and stdio `env` values commonly hold tokens, as does an OAuth
+ * client secret. Literal values are masked; pure `${NAME}` environment
+ * references are skipped because the input line itself carries no secret (the
+ * referenced variable is masked by the runner when it comes from `secrets`).
+ */
+function maskMcpSecrets(servers: Record<string, McpServerConfig>): void {
+  for (const config of Object.values(servers)) {
+    const { headers, env, oauth } = config as {
+      headers?: Record<string, string>;
+      env?: Record<string, string>;
+      oauth?: { clientSecret?: string };
+    };
+    for (const value of [...Object.values(headers ?? {}), ...Object.values(env ?? {})]) {
+      if (value && !/^\$\{[^}]+\}$/.test(value)) {
+        core.setSecret(value);
+      }
+    }
+    if (oauth?.clientSecret) {
+      core.setSecret(oauth.clientSecret);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
@@ -187,10 +336,28 @@ export function gatherActionsConfig(): PiConfig {
 
   // --- Optional boolean inputs -------------------------------------------
   const loadBuiltinExtensions = parseBooleanInput(core.getInput('load_builtin_extensions'), true);
+  const enableCodemode = parseBooleanInput(core.getInput('enable_codemode'), false);
+  const enableToolSearch = parseBooleanInput(core.getInput('enable_tool_search'), false);
+  const mcp = parseMcpServers(core.getInput('mcp_servers'));
+  if (mcp) {
+    maskMcpSecrets(mcp.servers);
+  }
   const exportSessionHtml = parseBooleanInput(core.getInput('export_session_html'), true);
   const exportSessionJsonl = parseBooleanInput(core.getInput('export_session_jsonl'), false);
   const autoCompaction = parseBooleanInput(core.getInput('auto_compaction'), false);
   const shareSession = parseBooleanInput(core.getInput('share_session'), false);
+  const refreshModelCatalog = parseBooleanInput(core.getInput('refresh_model_catalog'), true);
+
+  // --- Prompt cache warming -----------------------------------------------
+  const cacheWarmingRaw = core.getInput('cache_warming');
+  const cacheWarming = parseCacheWarmingMode(cacheWarmingRaw);
+  if (cacheWarmingRaw.trim() && !cacheWarming) {
+    core.warning(
+      `Unknown cache_warming "${cacheWarmingRaw.trim()}". ` +
+        `Valid values are: ${CACHE_WARMING_MODES.join(', ')}. ` +
+        'Falling back to the SDK default ("streaming").'
+    );
+  }
 
   // --- Session sharing storage backend inputs ---------------------------
   const shareGistProviderRaw = core.getInput('share_gist_provider').trim().toLowerCase();
@@ -252,10 +419,18 @@ export function gatherActionsConfig(): PiConfig {
     ...(extensions?.length ? { extensions } : {}),
     loadBuiltinExtensions,
     ...(loadedTools ? { loadedTools } : {}),
+    ...(enableCodemode ? { enableCodemode } : {}),
+    ...(enableToolSearch ? { enableToolSearch } : {}),
+    ...(mcp ? { mcpServers: mcp.servers } : {}),
+    ...(mcp?.autoEnableCodemode === undefined
+      ? {}
+      : { mcpAutoEnableCodemode: mcp.autoEnableCodemode }),
     ...(baseUrl ? { baseUrl } : {}),
     exportSessionHtml,
     exportSessionJsonl,
     autoCompaction,
+    ...(cacheWarming ? { cacheWarming } : {}),
+    refreshModelCatalog,
     shareSession,
     ...(shareGistProvider ? { shareGistProvider } : {}),
     ...(shareGistApiUrl ? { shareGistApiUrl } : {}),

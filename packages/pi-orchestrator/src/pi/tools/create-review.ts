@@ -23,6 +23,7 @@ import {
 } from '../prompt';
 import { CANCELLATION_MESSAGE_CREATE_REVIEW } from './constants';
 import { nullable, PREFER_STRICT_JSON_SCHEMA } from './schema';
+import { MUTATING_ANNOTATIONS, PI_ACTION_NAMESPACE } from './metadata';
 import type { CreateReviewParams, CreateReviewDetails, PlatformProvider } from '../../platform';
 import { withCancellation, isPresent } from './tool-execution';
 
@@ -107,6 +108,8 @@ export function createReviewToolFactory(provider: PlatformProvider) {
     promptGuidelines: CREATE_REVIEW_PROMPT_GUIDELINES,
     parameters: createReviewSchema,
     constrainedSampling: PREFER_STRICT_JSON_SCHEMA,
+    namespace: PI_ACTION_NAMESPACE,
+    annotations: MUTATING_ANNOTATIONS,
     execute: withCancellation({
       cancellationMessage: CANCELLATION_MESSAGE_CREATE_REVIEW,
       cancellationDetails: {

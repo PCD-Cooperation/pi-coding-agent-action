@@ -21,6 +21,12 @@ import {
 import { CANCELLATION_MESSAGE_GET_CI_STATUS } from './constants';
 import { nullable, PREFER_STRICT_JSON_SCHEMA } from './schema';
 import { withCancellation, isPresent } from './tool-execution';
+import {
+  READ_ONLY_ANNOTATIONS,
+  PI_ACTION_NAMESPACE,
+  ciStatusOutputSchema,
+  toStructuredContent,
+} from './metadata';
 import type { PlatformProvider, GetCIStatusParams, GetCIStatusDetails } from '../../platform';
 
 /**
@@ -79,6 +85,9 @@ export function getCIStatusToolFactory(provider: PlatformProvider) {
     promptGuidelines: GET_CI_STATUS_PROMPT_GUIDELINES(provider.type),
     parameters: getCIStatusSchema,
     constrainedSampling: PREFER_STRICT_JSON_SCHEMA,
+    namespace: PI_ACTION_NAMESPACE,
+    annotations: READ_ONLY_ANNOTATIONS,
+    outputSchema: ciStatusOutputSchema,
     execute: withCancellation({
       cancellationMessage: CANCELLATION_MESSAGE_GET_CI_STATUS,
       cancellationDetails: {
@@ -86,6 +95,7 @@ export function getCIStatusToolFactory(provider: PlatformProvider) {
         check_runs: [],
         workflow_runs: [],
       },
+      structuredContent: toStructuredContent,
       // fallow-ignore-next-line complexity
       prepareParams: (params: GetCIStatusToolParams): GetCIStatusParams => ({
         ...(isPresent(params.owner) ? { owner: params.owner } : {}),
