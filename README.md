@@ -497,10 +497,17 @@ This input does not enable delegation by itself.
 ```yaml
 enable_review_subagents: true
 max_review_subagents: 3
+review_subagent_model: gpt-6-luna
+review_subagent_thinking_level: medium
 ```
 
-Children use `github-copilot/gpt-6-luna:high`, the parent's in-memory OAuth runtime,
-and only `read`, `grep`, `find`, `ls`, and the SDK's official `codemode` extension.
+Children default to `github-copilot/gpt-6-luna:high`. Set `review_subagent_model`
+and `review_subagent_thinking_level` to choose a Copilot model and reasoning level
+independently of the parent. Model IDs may optionally have the `github-copilot/`
+prefix; other providers and embedded thinking suffixes are rejected. The model
+must be present in the shared runtime's catalog; reasoning support follows the
+selected model's SDK capabilities. Children share the parent's in-memory OAuth
+runtime and use only `read`, `grep`, `find`, `ls`, and the SDK's official `codemode` extension.
 They do not load project instructions, skills, ambient extensions or nested
 subagent tools. Each batch has a five-minute deadline and each child a 60-call
 hard tool budget. Child usage is added exactly once when results are collected.

@@ -166,6 +166,29 @@ describe('gatherActionsConfig', () => {
       expect(gatherActionsConfig().enableReviewSubagents).toBe(true);
       expect(gatherActionsConfig().publishComment).toBe(false);
     });
+    test('child model and thinking are configurable independently of the parent', () => {
+      expect(gatherActionsConfig().reviewSubagentModel).toBe('gpt-6-luna');
+      expect(gatherActionsConfig().reviewSubagentThinkingLevel).toBe('high');
+      mockCore({
+        review_subagent_model: 'github-copilot/gpt-6-sol',
+        review_subagent_thinking_level: 'medium',
+        thinking_level: 'xhigh',
+      });
+      const config = gatherActionsConfig();
+      expect(config.reviewSubagentModel).toBe('gpt-6-sol');
+      expect(config.reviewSubagentThinkingLevel).toBe('medium');
+      expect(config.thinkingLevel).toBe('xhigh');
+    });
+
+    test.each([
+      { review_subagent_model: 'openai/gpt-6-luna' },
+      { review_subagent_model: 'gpt-6-luna:high' },
+      { review_subagent_thinking_level: 'automatic' },
+    ])('rejects invalid child settings %j', inputs => {
+      mockCore(inputs);
+      expect(() => gatherActionsConfig()).toThrow('review_subagent_');
+    });
+
     test('review child limit defaults to three and accepts a custom limit', () => {
       expect(gatherActionsConfig().maxReviewSubagents).toBe(3);
       mockCore({ max_review_subagents: '5' });

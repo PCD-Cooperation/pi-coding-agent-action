@@ -127,3 +127,5 @@ export type { Logger as GitLogger, FileMode, TreeEntry } from './git';
 export { FILE_MODE_DIRECTORY, FILE_MODE_EXECUTABLE, FILE_MODE_REGULAR } from './git';
 export type { ChangeScanResult, ScanDirectoryParams, ScanOptions } from './git';
 export { scanForChanges, scanDirectory } from './git';
+
+export { resolveReviewSubagentSettings } from './pi/review-subagents/settings';

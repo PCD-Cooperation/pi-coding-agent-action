@@ -23,6 +23,7 @@ import type { OpengistExpiration, PiConfig } from '@alexanderfortin/pi-orchestra
 import {
   DEFAULT_OPENGIST_EXPIRATION,
   OPENGIST_EXPIRATIONS,
+  resolveReviewSubagentSettings,
 } from '@alexanderfortin/pi-orchestrator';
 
 /** Valid values for the `cache_warming` input (mirrors the SDK's modes). */
@@ -409,6 +410,11 @@ export function gatherActionsConfig(): PiConfig {
     throw new Error('max_review_subagents must be a positive safe integer.');
   }
 
+  const childSettings = resolveReviewSubagentSettings(
+    core.getInput('review_subagent_model'),
+    core.getInput('review_subagent_thinking_level')
+  );
+
   // --- Session sharing inputs --------------------------------------------
   const githubToken = core.getInput('github_token') || undefined;
   // Register the token for log masking — it may be a PAT/App token with
@@ -423,6 +429,8 @@ export function gatherActionsConfig(): PiConfig {
     model,
     token,
     maxReviewSubagents,
+    reviewSubagentModel: childSettings.model,
+    reviewSubagentThinkingLevel: childSettings.thinking,
     publishComment: parseBooleanInput(core.getInput('publish_comment'), true),
     ...(copilotOAuthToken ? { copilotOAuthToken } : {}),
     thinkingLevel,
