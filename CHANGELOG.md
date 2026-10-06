@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.30.0] - 2026-10-06
+
+### Added
+
+- **action**: add codemode, tool_search, and MCP server support (#418)
+- create PRs from a fork if insufficient permissions (#411)
+- **pi-orchestrator**: leverage pi 0.99 tool orchestration APIs
+
+### Changed
+
+- **deps**: bump deps, Pi to v1.0.4
+- **deps**: bump Pi sdk to v1.0.0
+- **deps**: bump Pi to v0.99.2
+- **deps**: bump Pi to v1.0.2
+- **deps**: bump Pi to v1.0.3
+
 ## [2.29.1] - 2026-09-28
 
 ### Changed
@@ -701,7 +717,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README link corrections
 - Codecov action updated, removed double build
 
-[unreleased]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.29.1...HEAD
+[unreleased]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.30.0...HEAD
+[2.30.0]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.29.1...v2.30.0
 [2.29.1]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.29.0...v2.29.1
 [2.29.0]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.28.1...v2.29.0
 [2.28.1]: https://github.com/shaftoe/pi-coding-agent-action/compare/v2.28.0...v2.28.1
