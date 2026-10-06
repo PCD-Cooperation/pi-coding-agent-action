@@ -144,7 +144,6 @@ export function reviewSubagentsFactory(
         inheritSkills: false,
         defaultContext: 'fresh',
       },
-      result: undefined,
     };
     pi.events.emit('pi-subagents:runtime-agent-register:v1', registration);
     if (!registration.result?.ok) {
