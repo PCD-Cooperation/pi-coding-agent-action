@@ -262,11 +262,15 @@ describe('ActionOrchestrator', () => {
       const orchestrator = createOrchestrator({
         enableReviewSubagents: true,
         maxReviewSubagents: 5,
+        reviewSubagentModel: 'gpt-6-sol',
+        reviewSubagentThinkingLevel: 'medium',
       });
       await orchestrator.execute();
       expectFactoryCalledWith(mockPiFactory, mockCore, mockProvider, {
         enableReviewSubagents: true,
         maxReviewSubagents: 5,
+        reviewSubagentModel: 'gpt-6-sol',
+        reviewSubagentThinkingLevel: 'medium',
       });
     });
 

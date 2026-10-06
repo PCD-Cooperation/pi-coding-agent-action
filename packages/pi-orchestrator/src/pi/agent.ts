@@ -179,7 +179,13 @@ export class Agent {
           () => {
             this.outputChunks = [];
           },
-          this.config.maxReviewSubagents ?? 3
+          this.config.maxReviewSubagents ?? 3,
+          {
+            ...(this.config.reviewSubagentModel ? { model: this.config.reviewSubagentModel } : {}),
+            ...(this.config.reviewSubagentThinkingLevel
+              ? { thinkingLevel: this.config.reviewSubagentThinkingLevel }
+              : {}),
+          }
         )
       );
     }

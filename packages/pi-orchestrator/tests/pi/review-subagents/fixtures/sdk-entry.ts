@@ -68,6 +68,10 @@ async function main() {
   let exchanges = 0;
   let inference = 0;
   let parentRequests = 0;
+  const childModel = process.env.CHILD_MODEL ?? 'gpt-6-luna';
+  const childThinking = process.env.CHILD_THINKING ?? 'high';
+  const parentThinking = process.env.PARENT_THINKING === 'xhigh' ? 'xhigh' : 'max';
+  const requestModels: string[] = [];
   const efforts: unknown[] = [];
   const toolSets: string[][] = [];
   const masked: string[] = [];
@@ -87,21 +91,27 @@ async function main() {
     }
     if (url.pathname === '/models') {
       return Response.json({
-        data: [{ id: 'gpt-6-luna', model_picker_enabled: true, policy: { state: 'enabled' } }],
+        data: ['gpt-6-luna', 'gpt-6-sol'].map(id => ({
+          id,
+          model_picker_enabled: true,
+          policy: { state: 'enabled' },
+        })),
       });
     }
     if (url.pathname !== '/responses') {
       throw new Error(`Unexpected network request: ${url.href}`);
     }
     const body = JSON.parse(String(init?.body)) as {
+      model: string;
       reasoning: { effort: string };
       tools: { name: string }[];
       input: { type: string }[];
     };
     efforts.push(body.reasoning.effort);
+    requestModels.push(body.model);
     toolSets.push(body.tools.map(tool => tool.name));
     inference++;
-    if (body.reasoning.effort === 'max') {
+    if (body.reasoning.effort === parentThinking) {
       parentRequests++;
       const names = ['subagent', 'codemode', 'wait_subagents'];
       const args = [
@@ -191,7 +201,8 @@ async function main() {
         runtime,
         () => undefined,
         () => undefined,
-        4
+        4,
+        { model: childModel, thinkingLevel: childThinking }
       ),
     ],
   });
@@ -204,7 +215,7 @@ async function main() {
     agentDir: cwd,
     modelRuntime: runtime,
     model,
-    thinkingLevel: 'max',
+    thinkingLevel: parentThinking,
     tools: [...CHILD_TOOLS, 'subagent', 'wait_subagents'],
     resourceLoader: loader,
     sessionManager: SessionManager.inMemory(cwd),
@@ -254,6 +265,7 @@ async function main() {
         totalTokens: session.getSessionStats().tokens.total,
         parentRead: parentRead.content,
         efforts,
+        requestModels,
         toolSets,
         exchanges,
         masked: masked.length,
