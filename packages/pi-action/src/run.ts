@@ -161,6 +161,7 @@ export async function run() {
     payload,
     serverUrl,
     runId: github.context.runId,
+    runAttempt: github.context.runAttempt,
     runNumber: github.context.runNumber,
     workspace: process.env.GITHUB_WORKSPACE ?? process.cwd(),
     ...(githubCtx.actor !== undefined ? { actor: githubCtx.actor } : {}),

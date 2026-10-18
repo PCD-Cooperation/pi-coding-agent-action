@@ -12,6 +12,7 @@
 
 import type { Temporal } from '@js-temporal/polyfill';
 import type { CommentMetadata } from '../types';
+import type { StatefulReviewPlatform } from '../review/types';
 
 /**
  * Platform identifiers supported by this action.
@@ -44,6 +45,8 @@ export interface PlatformContext {
    * which suppresses the "View action run" footer on posted comments.
    */
   runId?: number;
+  /** First event attempt only may establish an automatic review checkpoint. */
+  runAttempt?: number;
   /**
    * The current workflow run NUMBER (the per-repo sequence, read from
    * `GITHUB_RUN_NUMBER`).
@@ -357,6 +360,7 @@ export type CreateReactionType = unknown;
  * - Providing platform-specific implementations of common operations
  */
 export interface PlatformProvider {
+  readonly statefulReview?: StatefulReviewPlatform;
   /** The detected platform type */
   readonly type: PlatformType;
 

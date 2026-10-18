@@ -9,6 +9,7 @@ import type { Temporal } from '@js-temporal/polyfill';
 import type { CacheWarmingMode, McpServerConfig } from '@earendil-works/pi-coding-agent';
 import type { CreateReactionType, PlatformProvider } from './platform';
 import type { OpengistExpiration } from './share/opengist';
+import type { ReviewControl, ReviewSubmission } from './review/types';
 
 /**
  * Platform-neutral logging interface.
@@ -134,6 +135,7 @@ export interface SessionStats {
  * Result of running a Pi agent prompt, including the response text and session statistics.
  */
 export interface PromptResult {
+  review?: ReviewSubmission;
   /** The text response from the agent */
   result: string;
   /** Session statistics including token usage, if available */
@@ -247,6 +249,10 @@ export interface ResourceLoaderConfig extends DiffConfig {
  * Configuration for the Pi agent.
  */
 export interface PiConfig extends DiffConfig {
+  statefulReview?: boolean;
+  reviewMaxRounds?: number;
+  reviewControl?: ReviewControl;
+  reviewControlReason?: string;
   /** Publish the final comment; false keeps the result in action outputs for a pilot. */
   publishComment?: boolean;
   provider: string;

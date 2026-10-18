@@ -28,6 +28,8 @@ import type { CreateReactionType, PlatformProvider } from './platform';
 import { getActionVersion, formatActionVersion } from './version';
 import { MAX_GIST_CONTENT_BYTES, type CreatedGist, type GistProvider } from './share/gist';
 import { resolveGistProvider, resolveShareToken } from './share/provider';
+import { prepareReview, commitReview } from './review/runner';
+import { renderReviewComment } from './review/state';
 
 /**
  * Build the body of the success comment posted at the end of a run.
@@ -110,9 +112,26 @@ export class ActionOrchestrator {
       }
 
       reaction = await this.addReactionBestEffort();
+      const prepared = this.config.statefulReview
+        ? await prepareReview(this.platformProvider, this.config, prompt)
+        : undefined;
+      if (prepared?.skip && prepared.previous) {
+        this.outputSink.setOutput('review_outcome', prepared.skip);
+        this.outputSink.setOutput('review_revision', prepared.previous.state.revision);
+        await this.finalize(
+          renderReviewComment(prepared.previous.state),
+          this.config,
+          startTime,
+          reaction,
+          undefined,
+          true
+        );
+        return;
+      }
 
       pi = this.piAgentFactory(this.config, this.logger, this.platformProvider);
-      const { result, sessionStats, error } = await pi.run(prompt);
+      const response = await pi.run(prepared?.prompt ?? prompt);
+      const { result, sessionStats, error } = response;
 
       await this.runSessionExports(pi);
       await this.runSessionShare();
@@ -123,7 +142,16 @@ export class ActionOrchestrator {
       }
 
       this.logSessionBanner('✅ Agent session completed');
-      const finalBody = buildSessionSuccessBody(result);
+      let finalBody = buildSessionSuccessBody(result);
+      if (prepared) {
+        const committed = await commitReview(this.platformProvider, prepared, response);
+        finalBody = committed.body;
+        this.outputSink.setOutput('review_revision', committed.state.revision);
+        this.outputSink.setOutput(
+          'review_outcome',
+          committed.state.needsHuman ? 'needs_human' : 'reviewed'
+        );
+      }
       await this.finalize(finalBody, this.config, startTime, reaction, sessionStats, true);
     } catch (e) {
       await this.handleUncaughtError(e, startTime, reaction, pi);
@@ -583,7 +611,7 @@ export class ActionOrchestrator {
       metadata.sessionStats = sessionStats;
     }
 
-    if (config.publishComment !== false) {
+    if (config.publishComment !== false && !config.statefulReview) {
       await this.git.createFinalComment(body, metadata);
     }
   }

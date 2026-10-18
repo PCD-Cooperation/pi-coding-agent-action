@@ -25,6 +25,8 @@ import { REVIEW_SUBAGENTS_PACKAGE, reviewSubagentsFactory } from './review-subag
 import { resolveExtensions } from './resource-loader';
 import type { ReviewCoordinator } from './review-subagents/coordinator';
 import { getPiVersion } from '../version';
+import { createReviewSubmissionCapture, STATEFUL_REVIEW_TOOLS } from '../review/submission';
+import type { ReviewSubmissionCapture } from '../review/submission';
 
 import type { AgentSession, AgentSessionEvent } from '@earendil-works/pi-coding-agent';
 import type { Api, AssistantMessageEvent, Model } from '@earendil-works/pi-ai';
@@ -74,6 +76,7 @@ const MODEL_REFRESH_TIMEOUT_MS = 15_000;
  */
 export class Agent {
   private reviewCoordinator?: ReviewCoordinator;
+  private reviewSubmissionCapture?: ReviewSubmissionCapture;
   private model!: Model<Api>;
   private modelRuntime!: ModelRuntime;
   private session!: AgentSession;
@@ -190,6 +193,13 @@ export class Agent {
       );
     }
 
+    if (this.config.statefulReview) {
+      this.reviewSubmissionCapture = createReviewSubmissionCapture(() =>
+        Boolean(this.reviewCoordinator?.uncollected)
+      );
+      resourceLoaderOptions.extensionFactories.push(this.reviewSubmissionCapture.factory);
+    }
+
     if (this.config.token) {
       this.logger.debug(`[auth] Setting api_key token for ${this.config.provider} provider`);
       await this.applyRuntimeApiKey(this.config.token);
@@ -282,7 +292,31 @@ export class Agent {
     }
 
     // Phase 2: Create the session with the resolved model.
-    const loadedTools = this.config.loadedTools;
+    // Stateful reviews always have an authoritative read-only allowlist, even
+    // when the caller otherwise permits all tools. Optional tools are included
+    // only when actually registered, preserving unknown-name checks for callers.
+    const registeredTools = this.config.statefulReview
+      ? services.resourceLoader
+          .getExtensions()
+          .extensions.flatMap(extension => [...extension.tools.keys()])
+      : [];
+    const loadedTools = this.config.statefulReview
+      ? [
+          ...new Set([
+            ...(
+              this.config.loadedTools ?? [
+                'read',
+                'grep',
+                'find',
+                'ls',
+                ...registeredTools,
+                ...(this.config.enableCodemode ? ['codemode'] : []),
+              ]
+            ).filter(name => STATEFUL_REVIEW_TOOLS.has(name)),
+            'submit_review_result',
+          ]),
+        ]
+      : this.config.loadedTools;
     // Use a file-backed session when HTML/JSONL export is needed — the SDK's
     // exportToHtml() requires a session file and throws "Cannot export
     // in-memory session to HTML" for in-memory sessions. shareSession
@@ -486,6 +520,7 @@ export class Agent {
     // populate this field during the session.
     this.lastAgentError = undefined;
 
+    this.reviewSubmissionCapture?.reset();
     await this.session.prompt(text);
     if (this.reviewCoordinator?.uncollected) {
       throw new Error('Incomplete review: child findings were not collected.');
@@ -498,6 +533,25 @@ export class Agent {
     const sessionStats = this.collectSessionStats();
     const error = this.lastAgentError;
 
+    if (this.config.statefulReview) {
+      // A provider failure or aborted final turn must never expose a candidate
+      // submission to the host's commit path, even if the tool ran earlier.
+      const finalAssistant = [...this.session.messages]
+        .reverse()
+        .find(message => message.role === 'assistant');
+      if (
+        error ||
+        (finalAssistant?.role === 'assistant' &&
+          ['error', 'aborted'].includes(finalAssistant.stopReason))
+      ) {
+        throw new Error(error ?? 'Stateful review session failed or was aborted.');
+      }
+      const review = this.reviewSubmissionCapture?.getSubmission();
+      if (!review) {
+        throw new Error('Incomplete review: submit_review_result was not called successfully.');
+      }
+      return { result, sessionStats, error, review };
+    }
     return { result, sessionStats, error };
   }
 
