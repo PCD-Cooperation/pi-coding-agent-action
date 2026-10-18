@@ -36,6 +36,16 @@ export function createStatefulReviewPlatform(
       throw new Error('Review state repository/PR mismatch');
     }
   }
+  async function requireInstallationToken(): Promise<void> {
+    try {
+      // Octokit's tokenType is inferred from legacy token syntax, not server identity.
+      await octokit.rest.apps.listReposAccessibleToInstallation({ per_page: 1 });
+    } catch {
+      throw new Error(
+        'Unable to verify installation authentication; stateful review requires GITHUB_TOKEN.'
+      );
+    }
+  }
   async function live() {
     const { data: pr } = await octokit.rest.pulls.get({ ...repo, pull_number: pullNumber });
     if (pr.state !== 'open' || pr.draft || pr.merged) {
@@ -96,6 +106,7 @@ export function createStatefulReviewPlatform(
   return {
     loadState,
     async snapshot(previous) {
+      await requireInstallationToken();
       if (previous) {
         associated(previous);
       }
@@ -128,10 +139,7 @@ export function createStatefulReviewPlatform(
       }
     },
     async publish(expected, snapshot, state, body) {
-      const auth = (await octokit.auth()) as { tokenType?: string };
-      if (auth.tokenType !== 'installation') {
-        throw new Error('Stateful review publication requires GITHUB_TOKEN, not a user token');
-      }
+      await requireInstallationToken();
       associated(state);
       const parsed = parseReviewComment(body);
       if (JSON.stringify(parsed) !== JSON.stringify(state)) {

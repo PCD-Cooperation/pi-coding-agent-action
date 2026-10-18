@@ -28,8 +28,9 @@ import type { CreateReactionType, PlatformProvider } from './platform';
 import { getActionVersion, formatActionVersion } from './version';
 import { MAX_GIST_CONTENT_BYTES, type CreatedGist, type GistProvider } from './share/gist';
 import { resolveGistProvider, resolveShareToken } from './share/provider';
-import { prepareReview, commitReview } from './review/runner';
+import { prepareReview, commitReview, buildReviewState } from './review/runner';
 import { renderReviewComment } from './review/state';
+import type { ReviewSubmission } from './review/types';
 
 /**
  * Build the body of the success comment posted at the end of a run.
@@ -129,7 +130,15 @@ export class ActionOrchestrator {
         return;
       }
 
-      pi = this.piAgentFactory(this.config, this.logger, this.platformProvider);
+      const agentConfig = prepared
+        ? {
+            ...this.config,
+            reviewSubmissionValidator: (candidate: ReviewSubmission) => {
+              buildReviewState(prepared, candidate);
+            },
+          }
+        : this.config;
+      pi = this.piAgentFactory(agentConfig, this.logger, this.platformProvider);
       const response = await pi.run(prepared?.prompt ?? prompt);
       const { result, sessionStats, error } = response;
 

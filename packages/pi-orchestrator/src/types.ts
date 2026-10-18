@@ -250,6 +250,8 @@ export interface ResourceLoaderConfig extends DiffConfig {
  */
 export interface PiConfig extends DiffConfig {
   statefulReview?: boolean;
+  /** Host-owned transition validation, run before accepting a result-tool submission. */
+  reviewSubmissionValidator?: (submission: ReviewSubmission) => void;
   reviewMaxRounds?: number;
   reviewControl?: ReviewControl;
   reviewControlReason?: string;
