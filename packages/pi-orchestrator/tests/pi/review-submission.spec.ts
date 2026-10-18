@@ -9,7 +9,8 @@ import {
   parseReviewSubmission,
   ReviewSubmissionSchema,
 } from '../../src/review/submission';
-import type { ReviewSubmission } from '../../src/review/types';
+import type { ReviewSubmission, ReviewSnapshot } from '../../src/review/types';
+import { advanceReview, reviewHash } from '../../src/review/state';
 
 const validSubmission = (): ReviewSubmission => ({
   coverage: 'complete',
@@ -29,8 +30,11 @@ const validSubmission = (): ReviewSubmission => ({
   ],
 });
 
-async function setup(hasChildren = () => false) {
-  const capture = createReviewSubmissionCapture(hasChildren);
+async function setup(
+  hasChildren = () => false,
+  validateTransition?: (submission: ReviewSubmission) => void
+) {
+  const capture = createReviewSubmissionCapture(hasChildren, validateTransition);
   let tool!: ToolDefinition<typeof ReviewSubmissionSchema>;
   const handlers = new Map<string, (event: { toolName: string }) => unknown>();
   await capture.factory({
@@ -131,6 +135,36 @@ describe('submission extension', () => {
     expect(capture.getSubmission()?.findings).toHaveLength(1);
     await expect(execute(validSubmission())).rejects.toThrow('already been submitted');
     expect(capture.getSubmission()?.findings).toHaveLength(1);
+  });
+
+  test('invalid ledger IDs are correctable inside the tool before capture or termination', async () => {
+    const snapshot: ReviewSnapshot = {
+      repository: 'owner/repo',
+      pullNumber: 1,
+      headSha: 'a'.repeat(40),
+      baseSha: 'b'.repeat(40),
+      mergeBaseSha: 'c'.repeat(40),
+      baseRef: 'main',
+      intentHash: reviewHash('intent'),
+      mode: 'full',
+      fallbackReason: null,
+      headPath: '/head',
+      basePath: '/base',
+      previousPath: null,
+      fullDiffPath: '/full.diff',
+      incrementalDiffPath: null,
+    };
+    const validate = (candidate: ReviewSubmission) => {
+      advanceReview(null, snapshot, candidate, reviewHash('config'), reviewHash('operation'), 3);
+    };
+    const { execute, capture } = await setup(() => false, validate);
+    const invalid = validSubmission();
+    invalid.findings[0]!.id = 'invented-by-model';
+    await expect(execute(invalid)).rejects.toThrow('New findings must use id=null');
+    expect(capture.getSubmission()).toBeUndefined();
+    const accepted = await execute(validSubmission());
+    expect(accepted.terminate).toBe(true);
+    expect(capture.getSubmission()).toEqual(validSubmission());
   });
 
   test('rejects concurrent duplicate calls without overwriting the first', async () => {

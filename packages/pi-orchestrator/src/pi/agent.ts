@@ -194,8 +194,9 @@ export class Agent {
     }
 
     if (this.config.statefulReview) {
-      this.reviewSubmissionCapture = createReviewSubmissionCapture(() =>
-        Boolean(this.reviewCoordinator?.uncollected)
+      this.reviewSubmissionCapture = createReviewSubmissionCapture(
+        () => Boolean(this.reviewCoordinator?.uncollected),
+        this.config.reviewSubmissionValidator
       );
       resourceLoaderOptions.extensionFactories.push(this.reviewSubmissionCapture.factory);
     }

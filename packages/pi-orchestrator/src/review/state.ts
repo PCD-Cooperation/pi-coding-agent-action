@@ -138,7 +138,9 @@ function reconcileFindings(
   const findings = result.findings.map(input => {
     const old = input.id === null ? undefined : prior.get(input.id);
     if (input.id !== null && (!old || seen.has(input.id))) {
-      throw new Error(`Unknown or duplicate finding ID: ${input.id}`);
+      throw new Error(
+        `Unknown or duplicate finding ID: ${input.id}. New findings must use id=null; existing findings must reuse their exact ledger ID.`
+      );
     }
     if (!old && input.lifecycle !== 'open') {
       throw new Error('A new finding must start open.');

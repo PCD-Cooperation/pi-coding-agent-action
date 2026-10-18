@@ -123,6 +123,42 @@ describe('ActionOrchestrator', () => {
       expect(mockOutputSink.setOutput).toHaveBeenCalledWith('success', true);
     });
 
+    test('validates transitions inside the model result tool, then revalidates at commit', async () => {
+      mockPiFactory.mockImplementation((config: PiConfig) => {
+        expect(config.reviewSubmissionValidator).toBeTypeOf('function');
+        const invalid = {
+          coverage: 'complete' as const,
+          coverageNotes: 'Inspected.',
+          findings: [
+            {
+              id: 'invented',
+              rootCause: 'Ownership guard removed',
+              origin: 'pr_introduced' as const,
+              lifecycle: 'open' as const,
+              material: true,
+              location: 'service.py:1',
+              evidence: 'Current code lacks the guard.',
+              originEvidence: 'Base had the guard.',
+              dispositionReason: '',
+            },
+          ],
+        };
+        expect(() => config.reviewSubmissionValidator!(invalid)).toThrow('id=null');
+        const corrected = { ...invalid, findings: [{ ...invalid.findings[0]!, id: null }] };
+        expect(() => config.reviewSubmissionValidator!(corrected)).not.toThrow();
+        mockPiAgent.run = vi.fn(async () => ({
+          result: '',
+          sessionStats: undefined,
+          error: undefined,
+          review: corrected,
+        }));
+        return mockPiAgent;
+      });
+      await createOrchestrator().execute();
+      expect(record!.state.findings[0]!.id).toBe('F1');
+      expect(record!.state.revision).toBe(1);
+    });
+
     test('unchanged snapshot retries do not rerun the model or advance counters', async () => {
       await createOrchestrator().execute();
       vi.mocked(mockPiAgent.run).mockClear();

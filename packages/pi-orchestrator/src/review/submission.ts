@@ -7,7 +7,10 @@ const nonblank = () => Type.String({ pattern: '\\S' });
 
 export const FindingInputSchema = Type.Object(
   {
-    id: Type.Union([nonblank(), Type.Null()]),
+    id: Type.Union([nonblank(), Type.Null()], {
+      description:
+        'For a new finding use null. Reuse only an exact ID from the provided ledger; never invent an ID.',
+    }),
     rootCause: nonblank(),
     origin: Type.Union([
       Type.Literal('pr_introduced'),
@@ -68,7 +71,8 @@ export interface ReviewSubmissionCapture {
 
 /** Capture one validated result in memory; publication belongs exclusively to the host. */
 export function createReviewSubmissionCapture(
-  hasUncollectedChildren: () => boolean = () => false
+  hasUncollectedChildren: () => boolean = () => false,
+  validateTransition?: (submission: ReviewSubmission) => void
 ): ReviewSubmissionCapture {
   let submission: ReviewSubmission | undefined;
   return {
@@ -100,7 +104,9 @@ export function createReviewSubmissionCapture(
           if (hasUncollectedChildren()) {
             throw new Error('Incomplete review: child findings were not collected.');
           }
-          submission = parseReviewSubmission(params);
+          const candidate = parseReviewSubmission(params);
+          validateTransition?.(candidate);
+          submission = candidate;
           return {
             content: [{ type: 'text', text: 'Review result captured for host validation.' }],
             details: undefined,
