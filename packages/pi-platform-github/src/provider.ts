@@ -14,6 +14,7 @@
  */
 
 import { addReaction, deleteReaction } from './reactions';
+import { createStatefulReviewPlatform } from './review-state';
 import { createFinalComment } from './comments';
 import { getPrompt, getStartTimeFromContext } from './context';
 import { createPullRequest } from './tools/pull-request';
@@ -246,6 +247,7 @@ export function createGitHubPlatformProvider(deps: GitHubPlatformDeps): Platform
 
   return {
     type,
+    ...(type === 'github' ? { statefulReview: createStatefulReviewPlatform(moduleDeps) } : {}),
 
     getContext(): PlatformContext {
       return resolvedContext;

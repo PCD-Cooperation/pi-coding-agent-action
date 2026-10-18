@@ -31,6 +31,7 @@ Inspired by OpenCode's [GitHub action](https://opencode.ai/docs/github/).
 - **Issue assistance**: Prefix any new issue description and/or any issue comment with `/pi ` to have the agent analyze the issue, generate a report and/or create a new PR with the fix
 - **PR assistance**: Prefix any PR comment, review comment or review message with `/pi ` to have the agent review the pull request and/or to apply further changes
 - **Automated code reviews**: Have Pi review every new pull request automatically
+- **Stateful incremental reviews (opt-in)**: Persist finding identities, distinguish PR regressions from pre-existing issues, and bound review/fix cycles. See [the stateful review protocol](docs/stateful-review.md).
 - **Recurring tasks**: Schedule Pi to run periodic maintenance tasks such as dependency audits, security scans, documentation updates, or code quality checks
 - **Add Pi to your own pipelines**: (Optionally) generate prompt from upstream actions/workflows and have Pi do the work in background for you anywhere you like in your workflows
 

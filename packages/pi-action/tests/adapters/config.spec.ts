@@ -67,6 +67,43 @@ describe('gatherActionsConfig', () => {
     expect(coreMock.setSecret).toHaveBeenCalledWith('ghu_oauth-proof');
   });
 
+  describe('stateful review inputs', () => {
+    test('is disabled by default', () => {
+      expect(gatherActionsConfig().statefulReview).toBeUndefined();
+    });
+    test('parses opt-in controls and bounded rounds', () => {
+      mockCore({
+        stateful_review: 'true',
+        review_control: 'bootstrap',
+        review_control_reason: 'Start pilot.',
+        review_max_rounds: '3',
+      });
+      expect(gatherActionsConfig()).toMatchObject({
+        statefulReview: true,
+        reviewControl: 'bootstrap',
+        reviewControlReason: 'Start pilot.',
+        reviewMaxRounds: 3,
+      });
+    });
+    test.each(['0', '-1', '1.5', 'NaN', '9007199254740992'])(
+      'rejects invalid round budget %s',
+      value => {
+        mockCore({ stateful_review: 'true', review_max_rounds: value });
+        expect(() => gatherActionsConfig()).toThrow('positive safe integer');
+      }
+    );
+    test('requires canonical publication', () => {
+      mockCore({ stateful_review: 'true', publish_comment: 'false' });
+      expect(() => gatherActionsConfig()).toThrow('publish_comment=true');
+    });
+    test('rejects unrecognized controls and missing reasons', () => {
+      mockCore({ stateful_review: 'true', review_control: 'reset' });
+      expect(() => gatherActionsConfig()).toThrow('review_control must');
+      mockCore({ stateful_review: 'true', review_control: 'resume' });
+      expect(() => gatherActionsConfig()).toThrow('review_control_reason');
+    });
+  });
+
   describe('required fields validation', () => {
     test('throws descriptive error when provider is missing', () => {
       mockCore({ provider: '' });

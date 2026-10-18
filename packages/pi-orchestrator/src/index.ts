@@ -4,6 +4,27 @@
  * Re-exports the public API of the core orchestrator package.
  */
 
+export type {
+  FindingOrigin,
+  FindingLifecycle,
+  ReviewControl,
+  ReviewIdentity,
+  ReviewSnapshot,
+  FindingInput,
+  ReviewSubmission,
+  ReviewFinding,
+  ReviewState,
+  ReviewStateRecord,
+  StatefulReviewPlatform,
+} from './review/types';
+export {
+  REVIEW_STATE_MARKER,
+  parseReviewComment,
+  parseReviewState,
+  renderReviewComment,
+  reviewHash,
+} from './review/state';
+
 // Core business logic
 export { ActionOrchestrator, buildSessionSuccessBody, buildSessionErrorBody } from './orchestrator';
 

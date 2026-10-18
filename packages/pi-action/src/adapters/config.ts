@@ -423,8 +423,34 @@ export function gatherActionsConfig(): PiConfig {
     core.setSecret(githubToken);
   }
 
+  const statefulReview = parseBooleanInput(core.getInput('stateful_review'), false);
+  const reviewControlRaw = core.getInput('review_control').trim() || 'none';
+  if (!['none', 'bootstrap', 'resume', 'full'].includes(reviewControlRaw)) {
+    throw new Error('review_control must be none, bootstrap, resume, or full.');
+  }
+  const reviewControl = reviewControlRaw as NonNullable<PiConfig['reviewControl']>;
+  const reviewControlReason = core.getInput('review_control_reason').trim();
+  const reviewMaxRoundsRaw = core.getInput('review_max_rounds').trim() || '3';
+  const reviewMaxRounds = Number(reviewMaxRoundsRaw);
+  if (
+    !/^\d+$/.test(reviewMaxRoundsRaw) ||
+    !Number.isSafeInteger(reviewMaxRounds) ||
+    reviewMaxRounds < 1
+  ) {
+    throw new Error('review_max_rounds must be a positive safe integer.');
+  }
+  if (reviewControl !== 'none' && (!statefulReview || !reviewControlReason)) {
+    throw new Error('Manual review controls require stateful_review and review_control_reason.');
+  }
+  if (statefulReview && !parseBooleanInput(core.getInput('publish_comment'), true)) {
+    throw new Error('Stateful review requires publish_comment=true.');
+  }
+
   // --- Assemble PiConfig (only include optional keys when set) -----------
   return {
+    ...(statefulReview
+      ? { statefulReview, reviewMaxRounds, reviewControl, reviewControlReason }
+      : {}),
     provider,
     model,
     token,

@@ -9,6 +9,12 @@
 
 import { describe, expect, test, vi, beforeEach, afterEach } from 'vitest';
 import { Temporal } from '@js-temporal/polyfill';
+import { reviewHash, renderReviewComment } from '../src/review/state';
+import type {
+  ReviewSnapshot,
+  ReviewStateRecord,
+  StatefulReviewPlatform,
+} from '../src/review/types';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { ActionOrchestrator } from '@alexanderfortin/pi-orchestrator';
@@ -54,6 +60,182 @@ describe('ActionOrchestrator', () => {
       mockProvider
     );
   }
+
+  describe('stateful review', () => {
+    const snapshot: ReviewSnapshot = {
+      repository: 'test-owner/test-repo',
+      pullNumber: 1,
+      headSha: 'a'.repeat(40),
+      baseSha: 'b'.repeat(40),
+      mergeBaseSha: 'c'.repeat(40),
+      baseRef: 'main',
+      intentHash: reviewHash('intent'),
+      mode: 'full',
+      fallbackReason: null,
+      headPath: '/tmp/head',
+      basePath: '/tmp/base',
+      previousPath: null,
+      fullDiffPath: '/tmp/full.diff',
+      incrementalDiffPath: null,
+    };
+    let record: ReviewStateRecord | null;
+    let capability: StatefulReviewPlatform;
+
+    beforeEach(() => {
+      record = null;
+      capability = {
+        loadState: vi.fn(async () => record),
+        snapshot: vi.fn(async () => ({ ...snapshot })),
+        authorizeControl: vi.fn(async () => {}),
+        publish: vi.fn(async (_expected, _snapshot, state, body) => {
+          record = { commentId: 123, state, body };
+        }),
+      };
+      Object.assign(mockProvider, { statefulReview: capability });
+      const context = mockProvider.getContext();
+      Object.assign(mockProvider, { getContext: () => ({ ...context, actor: 'maintainer' }) });
+      defaultConfig = {
+        ...defaultConfig,
+        statefulReview: true,
+        exportSessionHtml: false,
+        reviewControl: 'bootstrap',
+        reviewControlReason: 'Start the pilot.',
+      };
+      mockPiAgent.run = vi.fn(async () => ({
+        result: 'Prose is not authoritative.',
+        sessionStats: undefined,
+        error: undefined,
+        review: {
+          coverage: 'complete' as const,
+          coverageNotes: 'Inspected all paths.',
+          findings: [],
+        },
+      }));
+    });
+
+    test('commits structured state without invoking generic comment publication', async () => {
+      await createOrchestrator().execute();
+      expect(capability.authorizeControl).toHaveBeenCalledOnce();
+      expect(capability.publish).toHaveBeenCalledOnce();
+      expect(record!.state.revision).toBe(1);
+      expect(mockGit.createFinalComment).not.toHaveBeenCalled();
+      expect(mockPiAgent.run).toHaveBeenCalledWith(expect.stringContaining('/tmp/full.diff'));
+      expect(mockOutputSink.setOutput).toHaveBeenCalledWith('success', true);
+    });
+
+    test('unchanged snapshot retries do not rerun the model or advance counters', async () => {
+      await createOrchestrator().execute();
+      vi.mocked(mockPiAgent.run).mockClear();
+      await createOrchestrator({ reviewControl: 'none', reviewControlReason: '' }).execute();
+      expect(mockPiAgent.run).not.toHaveBeenCalled();
+      expect(record!.state.completedReviews).toBe(1);
+      expect(mockOutputSink.setOutput).toHaveBeenCalledWith('review_outcome', 'unchanged');
+    });
+
+    test('only the first opened-event attempt can bootstrap automatically', async () => {
+      const context = mockProvider.getContext();
+      Object.assign(mockProvider, {
+        getContext: () => ({ ...context, payload: { action: 'opened' }, runAttempt: 2 }),
+      });
+      await expect(createOrchestrator({ reviewControl: 'none' }).execute()).rejects.toThrow(
+        'explicitly bootstrap'
+      );
+      Object.assign(mockProvider, {
+        getContext: () => ({ ...context, payload: { action: 'opened' }, runAttempt: 1 }),
+      });
+      await createOrchestrator({ reviewControl: 'none' }).execute();
+      expect(record!.state.completedReviews).toBe(1);
+      expect(capability.authorizeControl).not.toHaveBeenCalled();
+    });
+
+    test('refuses to invent a checkpoint on an existing PR', async () => {
+      await expect(createOrchestrator({ reviewControl: 'none' }).execute()).rejects.toThrow(
+        'explicitly bootstrap'
+      );
+      expect(mockPiAgent.run).not.toHaveBeenCalled();
+      expect(capability.publish).not.toHaveBeenCalled();
+    });
+
+    test('new revisions reconcile from the last committed head and use the incremental diff', async () => {
+      await createOrchestrator().execute();
+      const prior = record!.state;
+      capability.snapshot = vi.fn(async previous => {
+        expect(previous).toEqual(prior);
+        return {
+          ...snapshot,
+          headSha: 'd'.repeat(40),
+          mode: 'incremental' as const,
+          incrementalDiffPath: '/tmp/delta.diff',
+          previousPath: '/tmp/previous',
+        };
+      });
+      await createOrchestrator({ reviewControl: 'none', reviewControlReason: '' }).execute();
+      expect(mockPiAgent.run).toHaveBeenLastCalledWith(expect.stringContaining('/tmp/delta.diff'));
+      expect(record!.state.snapshot.headSha).toBe('d'.repeat(40));
+      expect(record!.state.reviewMode).toBe('incremental');
+      expect(record!.state.completedReviews).toBe(2);
+    });
+
+    test.each<Partial<PiConfig>>([
+      { model: 'another-model' },
+      { baseUrl: 'https://another-provider.example' },
+      { systemPrompt: 'Updated trusted system prompt.' },
+      { extensions: ['npm:pinned-review-extension@1.0.0'] },
+      { loadBuiltinExtensions: false },
+    ])('reviewer configuration changes force full reconciliation: %j', async override => {
+      await createOrchestrator().execute();
+      await createOrchestrator({ reviewControl: 'none', ...override }).execute();
+      expect(record!.state.reviewMode).toBe('full');
+      expect(record!.state.fallbackReason).toBe('Reviewer configuration changed.');
+      expect(record!.state.completedReviews).toBe(2);
+    });
+
+    test('unauthorized controls never run the model', async () => {
+      vi.mocked(capability.authorizeControl).mockRejectedValue(new Error('Not authorized'));
+      await expect(createOrchestrator().execute()).rejects.toThrow('Not authorized');
+      expect(mockPiAgent.run).not.toHaveBeenCalled();
+    });
+
+    test('stale publication does not set success or fall back to a generic comment', async () => {
+      vi.mocked(capability.publish).mockRejectedValue(new Error('Stale snapshot'));
+      await expect(createOrchestrator().execute()).rejects.toThrow('Stale snapshot');
+      expect(mockOutputSink.setOutput).not.toHaveBeenCalledWith('success', true);
+      expect(mockGit.createFinalComment).not.toHaveBeenCalled();
+      expect(mockPiAgent.dispose).toHaveBeenCalled();
+    });
+
+    test('incomplete review and missing submission leave the cursor unchanged', async () => {
+      mockPiAgent.run = vi.fn(async () => ({
+        result: '',
+        sessionStats: undefined,
+        error: undefined,
+        review: {
+          coverage: 'incomplete' as const,
+          coverageNotes: 'Child timed out.',
+          findings: [],
+        },
+      }));
+      await expect(createOrchestrator().execute()).rejects.toThrow('Incomplete review');
+      expect(capability.publish).not.toHaveBeenCalled();
+      setAgentRunResult(mockPiAgent);
+      await expect(createOrchestrator().execute()).rejects.toThrow('structured result');
+      expect(record).toBeNull();
+    });
+
+    test('human escalation is sticky, including full-review requests', async () => {
+      await createOrchestrator().execute();
+      record!.state.needsHuman = true;
+      record!.body = renderReviewComment(record!.state);
+      vi.mocked(mockPiAgent.run).mockClear();
+      await createOrchestrator({
+        reviewControl: 'full',
+        reviewControlReason: 'Inspect again.',
+      }).execute();
+      expect(mockPiAgent.run).not.toHaveBeenCalled();
+      expect(record!.state.completedReviews).toBe(1);
+      expect(mockOutputSink.setOutput).toHaveBeenCalledWith('review_outcome', 'needs_human');
+    });
+  });
 
   beforeEach(() => {
     // Create mock core adapter (used as Logger)
