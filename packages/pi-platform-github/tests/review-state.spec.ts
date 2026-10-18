@@ -88,6 +88,7 @@ function fixture() {
   const permission = vi.fn(async () => ({ data: { permission: 'write' } }));
   const prepare = vi.fn(async () => snapshot);
   const auth = vi.fn(async () => ({ token: 'token', tokenType: 'installation' }));
+  const installationRepos = vi.fn(async () => ({ data: { total_count: 1, repositories: [] } }));
   const warning = vi.fn();
   const deps = {
     logger: { warning },
@@ -101,6 +102,7 @@ function fixture() {
       auth,
       rest: {
         issues,
+        apps: { listReposAccessibleToInstallation: installationRepos },
         pulls: { get: vi.fn(async () => ({ data: pr })) },
         repos: { getCollaboratorPermissionLevel: permission },
       },
@@ -112,6 +114,7 @@ function fixture() {
     pr,
     permission,
     auth,
+    installationRepos,
     warning,
     prepare,
     context: deps.context,
@@ -411,11 +414,24 @@ describe('GitHub canonical state', () => {
   });
   it('rejects PAT publication before creating a misleading user-owned canonical record', async () => {
     const f = fixture();
-    f.auth.mockResolvedValue({ token: 'pat', tokenType: 'oauth' });
+    f.installationRepos.mockRejectedValue(new Error('403: installation access token required'));
     await expect(
       f.provider.publish(null, snapshot, state(), renderReviewComment(state()))
     ).rejects.toThrow('GITHUB_TOKEN');
     expect(f.issues.createComment).not.toHaveBeenCalled();
+  });
+  it('uses server authentication rather than Octokit token-format guesses', async () => {
+    const f = fixture();
+    f.auth.mockResolvedValue({ token: 'opaque-action-token', tokenType: 'oauth' });
+    await f.provider.publish(null, snapshot, state(), renderReviewComment(state()));
+    expect(f.installationRepos).toHaveBeenCalledWith({ per_page: 1 });
+    expect(f.issues.createComment).toHaveBeenCalledOnce();
+  });
+  it('rejects unverified snapshot authentication before preparing sources', async () => {
+    const f = fixture();
+    f.installationRepos.mockRejectedValue(new Error('Not an installation token'));
+    await expect(f.provider.snapshot(null)).rejects.toThrow('GITHUB_TOKEN');
+    expect(f.prepare).not.toHaveBeenCalled();
   });
   it('rejects unexpected read-back ownership without creating a replacement', async () => {
     const f = fixture();
