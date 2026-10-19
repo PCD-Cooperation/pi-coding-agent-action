@@ -175,6 +175,39 @@ describe('persistent review enrollment', () => {
     expect(f.labels.has(LABEL)).toBe(true);
     expect(f.issues.createComment).toHaveBeenCalledOnce();
   });
+  it('rejects enrollment that fits pending but cannot fit its publication intent', async () => {
+    const f = fixture();
+    await expect(
+      f.lifecycle().ensure(null, async () => ({
+        kind: 'bootstrap',
+        actor: 'writer',
+        reason: 'r'.repeat(11913),
+      }))
+    ).rejects.toThrow('publication capacity');
+    expect(f.comments).toEqual([]);
+    expect(f.labels).toEqual(new Set(['unrelated']));
+  });
+
+  it('reserves publication space using encoded bytes without changing enrollment', async () => {
+    const f = fixture();
+    const lifecycle = f.lifecycle();
+    const enrollment = {
+      kind: 'bootstrap' as const,
+      actor: 'writer',
+      reason: '\u0001'.repeat(1000),
+    };
+    await lifecycle.ensure(null, async () => enrollment);
+    expect(Buffer.byteLength(f.receiptComment().body)).toBeLessThanOrEqual(16 * 1024);
+    const next = state();
+    await lifecycle.begin(null, next, renderReviewComment(next));
+    expect(Buffer.byteLength(f.receiptComment().body)).toBeLessThanOrEqual(16 * 1024);
+    f.publish(next);
+    await lifecycle.finish((await f.load())!);
+    expect(Buffer.byteLength(f.receiptComment().body)).toBeLessThanOrEqual(16 * 1024);
+    expect(f.receipt().enrollment).toEqual(enrollment);
+    expect(f.receipt().phase).toBe('committed');
+  });
+
   it('requires one explicit bootstrap for untracked legacy PRs, never blind absence enrollment', async () => {
     const f = fixture();
     await expect(f.lifecycle().ensure(null, async () => null)).rejects.toThrow('bootstrap');

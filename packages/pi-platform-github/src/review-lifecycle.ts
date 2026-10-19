@@ -89,12 +89,27 @@ export function createReviewLifecycle(
   let known = false;
   let initialized = false;
   let ownedPublishing: Stored | null = null;
+  function serialize(receipt: Receipt): string {
+    return `${PREFIX}\n${Buffer.from(JSON.stringify(receipt)).toString('base64')}`;
+  }
   function encode(receipt: Receipt): string {
-    const body = `${PREFIX}\n${Buffer.from(JSON.stringify(receipt)).toString('base64')}`;
-    if (Buffer.byteLength(body) > LIMIT) {
-      fail();
+    const bound: Candidate = {
+      bodyHash: '0'.repeat(64),
+      revision: Number.MAX_SAFE_INTEGER,
+      operationKey: '0'.repeat(64),
+    };
+    const maximum: Receipt = {
+      ...receipt,
+      phase: 'publishing',
+      checkpoint: { ...bound, commentId: Number.MAX_SAFE_INTEGER },
+      candidate: bound,
+    };
+    if (Buffer.byteLength(serialize(maximum)) > LIMIT) {
+      throw new Error(
+        'Review initialization exceeds publication capacity; shorten the control reason'
+      );
     }
-    return body;
+    return serialize(receipt);
   }
   function decode(body: string): Receipt {
     if (Buffer.byteLength(body) > LIMIT || !body.startsWith(`${PREFIX}\n`)) {
@@ -154,7 +169,9 @@ export function createReviewLifecycle(
     ) {
       fail();
     }
-    return value as unknown as Receipt;
+    const receipt = value as unknown as Receipt;
+    encode(receipt);
+    return receipt;
   }
   async function* discover<T>(
     read: (page: number) => Promise<{ data: T[]; headers?: { link?: string } }>
