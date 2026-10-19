@@ -55,7 +55,10 @@ checkpoint; use external run artifacts/history if a full intervention audit is n
 ## Review flow
 
 1. Read the dedicated bot-owned comment, validating schema, identity and ledger.
-2. Capture head `H`, base tip `B`, merge-base `M`, PR intent and configuration.
+2. Capture head `H`, actual target-ref tip `B`, merge-base `M`, PR intent and
+   configuration. Resolve `refs/heads/<baseRef>` through GitHub; an older PR's API
+   `base.sha` is not assumed to be the current target tip. Re-resolve the ref before
+   publication to reject target movement or retargeting.
 3. Stage immutable source trees and complete diff files using trusted host Git.
    The first pass uses `M -> H`. Incremental passes use the exact endpoint diff
    `P -> H`, where `P` is the last successfully published reviewed head. This is
@@ -64,9 +67,12 @@ checkpoint; use external run artifacts/history if a full intervention audit is n
    A changed merge-base/base ref or unavailable old head causes an explicit full
    fallback, preserving the ledger and active budget. Reviewer configuration
    changes and the `full` control also trigger full discovery.
-5. Submit one schema-validated `submit_review_result` call. The host assigns IDs,
-   validates transitions, checks current head/base/intent and prior state, and
-   publishes the rendered summary and payload in one comment update.
+5. Submit one schema-validated `submit_review_result` call. Complete submissions
+   receive host-assigned IDs, transition validation, and current head/actual
+   target-ref/intent checks before one canonical comment update. An honest
+   incomplete submission is a valid final report, not a request to relabel its
+   coverage complete: it fails the run, preserves its reason/candidate evidence in
+   outputs and the job summary, and never advances or overwrites canonical state.
 6. Verify the written checkpoint. A publication error is never a reason to create
    replacement state. Ambiguous write timeouts are reconciled by operation key.
 
@@ -78,6 +84,32 @@ stop the run; no source or diff is silently truncated. `diff_max_lines`,
 not truncate these pinned files. Readers must paginate their own bounded output.
 Temporary snapshots remain until runner cleanup; use ephemeral runners or clean
 job-owned temp directories on persistent runners.
+
+## Approved dependency evidence
+
+For changed workflow files, the host may stage the exact commit-pinned public
+source of this action: only `PCD-Cooperation/pi-coding-agent-action` and upstream
+`shaftoe/pi-coding-agent-action`, and only the fixed `action.yml` and orchestrator
+source files. This source-controlled allowlist is maintainer policy, not a PR or
+model input. Both PR-head and merge-base references are considered. Mutable tags,
+arbitrary repositories/URLs, and additional file paths are not resolved.
+
+Workflow references are parsed as failsafe YAML, including quoted/escaped scalars
+and flow mappings; aliases, duplicate keys and parse errors fail closed. Scalar
+shell/prompt text is not interpreted as action syntax. The existing locked `yaml`
+package is declared as a core runtime dependency for this parsing boundary.
+
+The fetcher uses only the fixed HTTPS raw-GitHub host, no authentication, cookies,
+or credential forwarding, rejects redirects, and bounds reference count, file
+sizes, total bytes and time. Text is staged as non-executable evidence in temporary
+files; it is never imported, installed or executed. Missing or omitted approved
+context is explicit in the manifest and prevents a complete result. Other material
+external contracts still require an honest incomplete report if they cannot be
+established; this is not a general dependency resolver.
+
+The stable policy version and content hashes contribute to the reviewer fingerprint;
+job-specific temp paths do not. The prompt identifies the trusted workflow-checkout
+`REVIEW.md` separately from historical PR snapshots, which may legitimately lack it.
 
 ## Findings and convergence
 
@@ -111,9 +143,19 @@ Three actionable fix attempts with unresolved material regressions pause automat
 model runs until an authorized human resumes. Failure/incomplete coverage does not
 advance the cursor or constitute a clean review.
 
-Outputs `review_outcome` (`reviewed`, `unchanged`, `needs_human`) and
+Outputs `review_outcome` (`reviewed`, `unchanged`, `needs_human`, `incomplete`) and
 `review_revision` describe processing/checkpoint state, not merge authorization.
-The canonical summary separately renders `PASS`, `FINDINGS`, or `NEEDS_HUMAN`.
+For incomplete reports, `success=false`, the run is non-passing, and the revision
+remains the last successful checkpoint (0 if none exists). `review_result` contains
+JSON with `outcome`, pinned `snapshot`, unchanged `checkpointRevision`, and the
+uncommitted `submission` including its coverage reason and evidence candidates.
+The job summary explicitly labels these as claims, not accepted finding dispositions.
+The 60-KiB rendered-report budget is checked inside result submission before capture;
+oversized candidates receive a retryable tool error asking for shorter evidence while
+keeping `coverage=incomplete`, rather than losing an already accepted report.
+No canonical comment is created or changed, even if a candidate claims an old finding
+is fixed or accepted. The canonical summary separately renders `PASS`, `FINDINGS`,
+or `NEEDS_HUMAN` only for successfully committed complete reviews.
 
 ## Tool boundary and rollout
 

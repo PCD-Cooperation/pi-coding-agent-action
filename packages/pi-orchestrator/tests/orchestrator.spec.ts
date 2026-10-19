@@ -17,6 +17,7 @@ import type {
 } from '../src/review/types';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { tmpdir } from 'node:os';
 import { ActionOrchestrator } from '@alexanderfortin/pi-orchestrator';
 import type {
   CoreAdapter,
@@ -80,8 +81,19 @@ describe('ActionOrchestrator', () => {
     };
     let record: ReviewStateRecord | null;
     let capability: StatefulReviewPlatform;
+    let fixtureDirectory: string;
 
     beforeEach(() => {
+      fixtureDirectory = fs.mkdtempSync(path.join(tmpdir(), 'pi-review-orchestrator-'));
+      snapshot.fullDiffPath = path.join(fixtureDirectory, 'full.diff');
+      snapshot.headPath = path.join(fixtureDirectory, 'head');
+      snapshot.basePath = path.join(fixtureDirectory, 'base');
+      fs.mkdirSync(snapshot.headPath);
+      fs.mkdirSync(snapshot.basePath);
+      fs.writeFileSync(
+        snapshot.fullDiffPath,
+        'diff --git a/service.py b/service.py\n--- a/service.py\n+++ b/service.py\n'
+      );
       record = null;
       capability = {
         loadState: vi.fn(async () => record),
@@ -113,13 +125,17 @@ describe('ActionOrchestrator', () => {
       }));
     });
 
+    afterEach(() => {
+      fs.rmSync(fixtureDirectory, { recursive: true, force: true });
+    });
+
     test('commits structured state without invoking generic comment publication', async () => {
       await createOrchestrator().execute();
       expect(capability.authorizeControl).toHaveBeenCalledOnce();
       expect(capability.publish).toHaveBeenCalledOnce();
       expect(record!.state.revision).toBe(1);
       expect(mockGit.createFinalComment).not.toHaveBeenCalled();
-      expect(mockPiAgent.run).toHaveBeenCalledWith(expect.stringContaining('/tmp/full.diff'));
+      expect(mockPiAgent.run).toHaveBeenCalledWith(expect.stringContaining(snapshot.fullDiffPath));
       expect(mockOutputSink.setOutput).toHaveBeenCalledWith('success', true);
     });
 
@@ -240,7 +256,7 @@ describe('ActionOrchestrator', () => {
       expect(mockPiAgent.dispose).toHaveBeenCalled();
     });
 
-    test('incomplete review and missing submission leave the cursor unchanged', async () => {
+    test('reports an incomplete result with no checkpoint without disguising it as a missing submission', async () => {
       mockPiAgent.run = vi.fn(async () => ({
         result: '',
         sessionStats: undefined,
@@ -251,11 +267,149 @@ describe('ActionOrchestrator', () => {
           findings: [],
         },
       }));
-      await expect(createOrchestrator().execute()).rejects.toThrow('Incomplete review');
+      await createOrchestrator().execute();
       expect(capability.publish).not.toHaveBeenCalled();
+      expect(mockOutputSink.setOutput).toHaveBeenCalledWith('review_outcome', 'incomplete');
+      expect(mockOutputSink.setOutput).toHaveBeenCalledWith('review_revision', 0);
+      expect(mockOutputSink.setOutput).toHaveBeenCalledWith('success', false);
+      expect(mockOutputSink.setOutput).not.toHaveBeenCalledWith('success', true);
+      expect(mockOutputSink.appendSummary).toHaveBeenCalledWith(
+        expect.stringContaining('Child timed out.')
+      );
+      expect(mockOutputSink.setFailed).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'Incomplete review: Child timed out.' })
+      );
+      expect(mockGit.createFinalComment).not.toHaveBeenCalled();
+      expect(record).toBeNull();
+    });
+
+    test('missing submission still fails without publication', async () => {
       setAgentRunResult(mockPiAgent);
       await expect(createOrchestrator().execute()).rejects.toThrow('structured result');
+      expect(capability.publish).not.toHaveBeenCalled();
       expect(record).toBeNull();
+    });
+
+    test('incomplete evidence cannot change existing findings, cursor, counters, or escalation', async () => {
+      await createOrchestrator().execute();
+      const before = structuredClone(record);
+      vi.mocked(capability.publish).mockClear();
+      const candidate = {
+        coverage: 'incomplete' as const,
+        coverageNotes: 'Pinned dependency source unavailable.',
+        findings: [
+          {
+            id: null,
+            rootCause: 'Candidate retry defect',
+            origin: 'uncertain' as const,
+            lifecycle: 'open' as const,
+            material: true,
+            location: 'service.py:4',
+            evidence: 'A retry may repeat the operation.',
+            originEvidence: 'Dependency contract could not be established.',
+            dispositionReason: '',
+          },
+        ],
+      };
+      mockPiFactory.mockImplementation((config: PiConfig) => {
+        expect(() => config.reviewSubmissionValidator!(candidate)).not.toThrow();
+        return mockPiAgent;
+      });
+      mockPiAgent.run = vi.fn(async () => ({
+        result: '',
+        sessionStats: undefined,
+        error: undefined,
+        review: candidate,
+      }));
+      await createOrchestrator({
+        reviewControl: 'full',
+        reviewControlReason: 'Coverage test.',
+      }).execute();
+      expect(record).toEqual(before);
+      expect(capability.publish).not.toHaveBeenCalled();
+      expect(mockOutputSink.setOutput).toHaveBeenCalledWith('review_revision', 1);
+      const resultCall = vi
+        .mocked(mockOutputSink.setOutput)
+        .mock.calls.find(call => call[0] === 'review_result');
+      expect(JSON.parse(String(resultCall![1]))).toEqual({
+        outcome: 'incomplete',
+        snapshot: expect.objectContaining({ headSha: snapshot.headSha, baseSha: snapshot.baseSha }),
+        checkpointRevision: 1,
+        submission: candidate,
+      });
+      expect(mockOutputSink.appendSummary).toHaveBeenCalledWith(
+        expect.stringContaining('Uncommitted evidence candidates')
+      );
+      expect(mockOutputSink.appendSummary).toHaveBeenCalledWith(
+        expect.stringContaining(candidate.findings[0]!.evidence)
+      );
+      expect(mockGit.createFinalComment).not.toHaveBeenCalled();
+    });
+
+    test('missing dependency context permits honest incomplete reporting but forbids a complete result', async () => {
+      const workflow = '.github/workflows/review.yml';
+      fs.mkdirSync(path.join(snapshot.headPath, '.github/workflows'), { recursive: true });
+      fs.writeFileSync(
+        path.join(snapshot.headPath, workflow),
+        'steps:\n  - uses: PCD-Cooperation/pi-coding-agent-action@' + 'a'.repeat(40) + '\n'
+      );
+      fs.writeFileSync(
+        snapshot.fullDiffPath,
+        `diff --git a/${workflow} b/${workflow}\n--- a/${workflow}\n+++ b/${workflow}\n`
+      );
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn(async () => new Response('not found', { status: 404 }));
+      try {
+        mockPiFactory.mockImplementation((config: PiConfig) => {
+          expect(() =>
+            config.reviewSubmissionValidator!({
+              coverage: 'complete',
+              coverageNotes: '',
+              findings: [],
+            })
+          ).toThrow('dependency context is incomplete');
+          const review = {
+            coverage: 'incomplete' as const,
+            coverageNotes: 'Approved dependency was unavailable.',
+            findings: [],
+          };
+          expect(() => config.reviewSubmissionValidator!(review)).not.toThrow();
+          mockPiAgent.run = vi.fn(async () => ({
+            result: '',
+            sessionStats: undefined,
+            error: undefined,
+            review,
+          }));
+          return mockPiAgent;
+        });
+        await createOrchestrator().execute();
+        expect(record).toBeNull();
+        expect(capability.publish).not.toHaveBeenCalled();
+        expect(mockOutputSink.setOutput).toHaveBeenCalledWith('review_outcome', 'incomplete');
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    test('summary-write errors retain incomplete result outputs and non-passing status', async () => {
+      vi.mocked(mockOutputSink.appendSummary!).mockRejectedValue(new Error('Summary unavailable'));
+      mockPiAgent.run = vi.fn(async () => ({
+        result: '',
+        sessionStats: undefined,
+        error: undefined,
+        review: {
+          coverage: 'incomplete' as const,
+          coverageNotes: 'External contract unavailable.',
+          findings: [],
+        },
+      }));
+      await createOrchestrator().execute();
+      expect(mockOutputSink.setOutput).toHaveBeenCalledWith('review_outcome', 'incomplete');
+      expect(mockOutputSink.setOutput).toHaveBeenCalledWith('success', false);
+      expect(mockOutputSink.setFailed).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'Incomplete review: External contract unavailable.' })
+      );
+      expect(capability.publish).not.toHaveBeenCalled();
     });
 
     test('human escalation is sticky, including full-review requests', async () => {

@@ -28,8 +28,8 @@ import type { CreateReactionType, PlatformProvider } from './platform';
 import { getActionVersion, formatActionVersion } from './version';
 import { MAX_GIST_CONTENT_BYTES, type CreatedGist, type GistProvider } from './share/gist';
 import { resolveGistProvider, resolveShareToken } from './share/provider';
-import { prepareReview, commitReview, buildReviewState } from './review/runner';
-import { renderReviewComment } from './review/state';
+import { prepareReview, commitReview, validateReviewSubmission } from './review/runner';
+import { renderReviewComment, renderIncompleteReview, reviewIdentity } from './review/state';
 import type { ReviewSubmission } from './review/types';
 
 /**
@@ -134,7 +134,7 @@ export class ActionOrchestrator {
         ? {
             ...this.config,
             reviewSubmissionValidator: (candidate: ReviewSubmission) => {
-              buildReviewState(prepared, candidate);
+              validateReviewSubmission(prepared, candidate);
             },
           }
         : this.config;
@@ -147,6 +147,35 @@ export class ActionOrchestrator {
 
       if (error) {
         await this.handleSessionError(error, result, startTime, reaction, sessionStats);
+        return;
+      }
+
+      if (prepared && response.review?.coverage === 'incomplete') {
+        const body = renderIncompleteReview(
+          prepared.snapshot,
+          response.review,
+          prepared.previous?.state ?? null
+        );
+        this.outputSink.setOutput('review_outcome', 'incomplete');
+        this.outputSink.setOutput('review_revision', prepared.previous?.state.revision ?? 0);
+        this.outputSink.setOutput(
+          'review_result',
+          JSON.stringify({
+            outcome: 'incomplete',
+            snapshot: reviewIdentity(prepared.snapshot),
+            checkpointRevision: prepared.previous?.state.revision ?? 0,
+            submission: response.review,
+          })
+        );
+        await this.finalize(body, this.config, startTime, reaction, sessionStats, false);
+        this.outputSink.setFailed(new Error(`Incomplete review: ${response.review.coverageNotes}`));
+        try {
+          await this.outputSink.appendSummary?.(body);
+        } catch {
+          this.logger.warning(
+            'Incomplete review summary could not be written; evidence remains in action outputs.'
+          );
+        }
         return;
       }
 

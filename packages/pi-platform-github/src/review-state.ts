@@ -54,16 +54,39 @@ export function createStatefulReviewPlatform(
     if (pr.head.repo?.full_name !== repository || pr.base.repo.full_name !== repository) {
       throw new Error('Fork PRs are not supported');
     }
-    if (!/^[a-f0-9]{40}$/.test(pr.head.sha) || !/^[a-f0-9]{40}$/.test(pr.base.sha)) {
+    if (pr.head.sha.length !== 40 || !/^[a-f0-9]{40}$/.test(pr.head.sha)) {
       throw new Error('Invalid live commit SHA');
+    }
+    const baseRef = pr.base.ref;
+    if (
+      typeof baseRef !== 'string' ||
+      !baseRef ||
+      baseRef === '@' ||
+      /[\x00-\x20\x7f~^:?*\[\\]/.test(baseRef) ||
+      baseRef.includes('..') ||
+      baseRef.includes('@{') ||
+      baseRef.endsWith('.') ||
+      baseRef.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.lock'))
+    ) {
+      throw new Error('Invalid live base ref');
+    }
+    // PR base.sha may lag behind the named branch's current tip.
+    const { data: ref } = await octokit.rest.git.getRef({ ...repo, ref: `heads/${baseRef}` });
+    if (
+      ref.object?.type !== 'commit' ||
+      typeof ref.object.sha !== 'string' ||
+      ref.object.sha.length !== 40 ||
+      !/^[a-f0-9]{40}$/.test(ref.object.sha)
+    ) {
+      throw new Error('Invalid live base ref commit');
     }
     return {
       repository,
       pullNumber,
       cloneUrl: pr.base.repo.clone_url,
       headSha: pr.head.sha,
-      baseSha: pr.base.sha,
-      baseRef: pr.base.ref,
+      baseSha: ref.object.sha,
+      baseRef,
       intentHash: createHash('sha256')
         .update(JSON.stringify([pr.title, pr.body ?? '']))
         .digest('hex'),
