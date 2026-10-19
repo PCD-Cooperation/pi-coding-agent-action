@@ -87,6 +87,7 @@ If you need to pin to a specific Pi SDK version check out previous release tags 
 | `jiti` | `2.7.0` |  |
 | `simple-git` | `3.36.0` |  |
 | `typebox` | `1.3.6` | JSON Schema Type Builder |
+| `yaml` | `2.9.1` |  |
 
 <!-- DEPS_TABLE_END -->
 
