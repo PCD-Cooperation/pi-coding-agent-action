@@ -79,12 +79,18 @@ async function main() {
     fallbackReason: null,
     headPath: join(snapshotRoot, 'head'),
     basePath: join(snapshotRoot, 'base'),
+    targetPath: join(snapshotRoot, 'target'),
     previousPath: join(snapshotRoot, 'previous'),
     fullDiffPath: join(snapshotRoot, 'full.diff'),
     incrementalDiffPath: join(snapshotRoot, 'incremental.diff'),
   };
   const dependencyPath = join(snapshotRoot, 'dependency.txt');
-  for (const tree of [snapshot.headPath, snapshot.basePath, snapshot.previousPath]) {
+  for (const tree of [
+    snapshot.headPath,
+    snapshot.basePath,
+    snapshot.targetPath,
+    snapshot.previousPath,
+  ]) {
     mkdirSync(tree, { recursive: true });
     writeFileSync(join(tree, 'source.txt'), 'PINNED_' + tree.split('/').at(-1));
   }
@@ -225,6 +231,7 @@ async function main() {
         ...[
           context.snapshot.headPath,
           context.snapshot.basePath,
+          context.snapshot.targetPath!,
           context.snapshot.previousPath!,
         ].map(tree => join(tree, 'source.txt')),
         context.snapshot.fullDiffPath,
@@ -252,7 +259,15 @@ async function main() {
     }
     if (pinned) {
       const output = JSON.stringify(body.input);
-      for (const value of ['head', 'base', 'previous', 'full', 'incremental', 'dependency']) {
+      for (const value of [
+        'head',
+        'base',
+        'target',
+        'previous',
+        'full',
+        'incremental',
+        'dependency',
+      ]) {
         if (!output.includes('PINNED_' + value)) {
           throw new Error('Pinned read failed: ' + value);
         }

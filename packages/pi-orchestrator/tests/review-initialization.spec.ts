@@ -56,6 +56,9 @@ describe('static review coverage guidance', () => {
     const { prompt } = await prepareReview(f.provider, f.config, 'Review');
     expect(prompt).toContain('A breaking-change label or PR intent never waives authorization');
     expect(prompt).toContain('Never certify readiness or waive a hold');
+    expect(prompt).toContain('basePath is the historical merge-base M');
+    expect(prompt).toContain('targetPath, when present, is the actual target-ref tip B');
+    expect(prompt).toContain('Ordinary none does not universally require manual bootstrap');
     expect(prompt).toContain(
       'Missing external source requires incomplete coverage when a material implementation decision'
     );

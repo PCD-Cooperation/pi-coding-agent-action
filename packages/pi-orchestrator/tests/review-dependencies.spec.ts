@@ -87,7 +87,7 @@ describe('approved immutable dependency evidence', () => {
       expect(init).not.toHaveProperty('headers');
       expect(new URL(String(url)).username).toBe('');
     }
-    expect(result.policyVersion).toBe('approved-action-pins-v2');
+    expect(result.policyVersion).toBe('approved-action-pins-v3');
     expect(result.contexts[0]!.files.map(file => file.path)).toEqual([
       ...requiredFiles,
       ...versionedFiles,
@@ -97,6 +97,19 @@ describe('approved immutable dependency evidence', () => {
       expect(file.sha256).toBe(createHash('sha256').update('public source\r\n').digest('hex'));
       expect((await stat(file.localPath)).mode & 0o777).toBe(0o600);
     }
+  });
+
+  test('includes immutable action pins introduced on the actual target after the PR baseline', async () => {
+    const f = await fixture();
+    f.snapshot.targetPath = join(f.root, 'target');
+    const targetWorkflow = join(f.snapshot.targetPath, workflow);
+    await mkdir(dirname(targetWorkflow), { recursive: true });
+    const targetSha = 'b'.repeat(40);
+    await writeFile(targetWorkflow, `uses: ${repo}@${targetSha}`);
+    const result = await prepareReviewDependencies(f.snapshot, f.options);
+    expect(result.complete).toBe(true);
+    expect(result.contexts.map(context => context.sha)).toEqual([sha, targetSha]);
+    expect(f.fetcher).toHaveBeenCalledTimes(14);
   });
 
   test('fetches only fixed contract paths, never imports or URLs from fetched content', async () => {
@@ -429,6 +442,22 @@ describe('approved immutable dependency evidence', () => {
           'octokit.rest.issues.createComment({ ...repo, issue_number: pullNumber, body })'
         );
       }
+    },
+    60_000
+  );
+
+  test.runIf(process.env.RUN_PUBLIC_DEPENDENCY_SMOKE === '1')(
+    'mixed historical and actual-target contract sources fit the unchanged byte budget',
+    async () => {
+      const f = await fixture();
+      f.snapshot.targetPath = join(f.root, 'target');
+      const path = join(f.snapshot.targetPath, workflow);
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, `uses: ${repo}@77f6108ebb8bfb6f287278291f99f99b01d98f1b`);
+      const result = await prepareReviewDependencies(f.snapshot, { tempRoot: f.root });
+      expect(result.complete, result.notes.join('\n')).toBe(true);
+      expect(result.contexts).toHaveLength(2);
+      expect(result.contexts.flatMap(context => context.files)).toHaveLength(11);
     },
     60_000
   );
