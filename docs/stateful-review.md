@@ -138,7 +138,9 @@ approve deployment.
 Distinguish declared intent from implementation proof. An explicitly intended
 breaking contract is not an accidental regression solely because old clients
 have a different contract. Review the new behavior and transition safeguards;
-claims that consumers have migrated are not proof. If a material implementation
+claims that consumers have migrated are not proof. Breaking-change labels and
+stated intent never waive authorization/privacy/data-integrity invariants, trusted
+policy or human risk acceptance. If a material implementation
 decision actually requires absent external source, coverage remains incomplete.
 
 For generated data, inspect the generator/configuration, packaged baseline,

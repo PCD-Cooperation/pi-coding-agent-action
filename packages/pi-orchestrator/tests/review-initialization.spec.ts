@@ -50,6 +50,19 @@ function fixture() {
   return { platform, provider, context, config };
 }
 
+describe('static review coverage guidance', () => {
+  it('separates deployment prerequisites without waiving security or incomplete evidence', async () => {
+    const f = fixture();
+    const { prompt } = await prepareReview(f.provider, f.config, 'Review');
+    expect(prompt).toContain('A breaking-change label or PR intent never waives authorization');
+    expect(prompt).toContain('Never certify readiness or waive a hold');
+    expect(prompt).toContain(
+      'Missing external source requires incomplete coverage when a material implementation decision'
+    );
+    expect(prompt).toContain('The host reports it as non-passing without advancing the checkpoint');
+  });
+});
+
 describe('automatic first draft readiness initialization', () => {
   it('initializes with control none only after provider proof', async () => {
     const f = fixture();
