@@ -11,6 +11,8 @@ import {
 } from '../../src/review/submission';
 import type { ReviewSubmission, ReviewSnapshot } from '../../src/review/types';
 import { advanceReview, reviewHash } from '../../src/review/state';
+import { validateReviewSubmission } from '../../src/review/runner';
+import type { PreparedReview } from '../../src/review/runner';
 
 const validSubmission = (): ReviewSubmission => ({
   coverage: 'complete',
@@ -165,6 +167,61 @@ describe('submission extension', () => {
     const accepted = await execute(validSubmission());
     expect(accepted.terminate).toBe(true);
     expect(capture.getSubmission()).toEqual(validSubmission());
+  });
+
+  test('honest incomplete coverage is captured as the final report, not retried as complete', async () => {
+    const { capture, execute } = await setup();
+    const result = validSubmission();
+    result.coverage = 'incomplete';
+    result.coverageNotes = 'Pinned external action contract is unavailable.';
+    const accepted = await execute(result);
+    expect(accepted.terminate).toBe(true);
+    expect(capture.getSubmission()).toEqual(result);
+    await expect(execute(validSubmission())).rejects.toThrow('already been submitted');
+  });
+
+  test('oversized incomplete evidence is retryable before terminal capture without losing the reason', async () => {
+    const prepared: PreparedReview = {
+      previous: null,
+      snapshot: {
+        repository: 'owner/repo',
+        pullNumber: 1,
+        headSha: 'a'.repeat(40),
+        baseSha: 'b'.repeat(40),
+        mergeBaseSha: 'c'.repeat(40),
+        baseRef: 'main',
+        intentHash: reviewHash('intent'),
+        mode: 'full',
+        fallbackReason: null,
+        headPath: '/head',
+        basePath: '/base',
+        previousPath: null,
+        fullDiffPath: '/full.diff',
+        incrementalDiffPath: null,
+      },
+      dependencies: { policyVersion: 'test', complete: true, contexts: [], notes: [] },
+      configurationHash: reviewHash('config'),
+      operationKey: reviewHash('operation'),
+      intervention: null,
+      maxRounds: 3,
+      prompt: '',
+      skip: null,
+    };
+    const { capture, execute } = await setup(
+      () => false,
+      candidate => validateReviewSubmission(prepared, candidate)
+    );
+    const candidate = validSubmission();
+    candidate.coverage = 'incomplete';
+    candidate.coverageNotes = 'The external action contract cannot be verified.';
+    candidate.findings[0]!.evidence = 'e'.repeat(70_000);
+    await expect(execute(candidate)).rejects.toThrow('resubmit with coverage=incomplete');
+    expect(capture.getSubmission()).toBeUndefined();
+    candidate.findings[0]!.evidence =
+      'The action output is consumed but its source was unavailable.';
+    await expect(execute(candidate)).resolves.toMatchObject({ terminate: true });
+    expect(capture.getSubmission()).toEqual(candidate);
+    expect(capture.getSubmission()?.coverageNotes).toBe(candidate.coverageNotes);
   });
 
   test('rejects concurrent duplicate calls without overwriting the first', async () => {

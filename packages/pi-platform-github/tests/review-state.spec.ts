@@ -13,7 +13,7 @@ vi.mock('node:child_process', async () => {
   return { ...original, execFile: mocked };
 });
 import { renderReviewComment } from '@alexanderfortin/pi-orchestrator';
-import type { ReviewState, ReviewSnapshot } from '@alexanderfortin/pi-orchestrator';
+import type { ReviewIdentity, ReviewState, ReviewSnapshot } from '@alexanderfortin/pi-orchestrator';
 import type { GitHubModuleDeps } from '../src/types';
 import { createStatefulReviewPlatform } from '../src/review-state';
 
@@ -67,7 +67,7 @@ function fixture() {
     body: 'Body',
     head: { sha: H, repo: { full_name: 'owner/repo' } },
     base: {
-      sha: B,
+      sha: '7'.repeat(40),
       ref: 'main',
       repo: { full_name: 'owner/repo', clone_url: 'https://github.com/owner/repo.git' },
     },
@@ -86,7 +86,12 @@ function fixture() {
     }),
   };
   const permission = vi.fn(async () => ({ data: { permission: 'write' } }));
-  const prepare = vi.fn(async () => snapshot);
+  const prepare = vi.fn(async (identity: Omit<ReviewIdentity, 'mergeBaseSha'>) => ({
+    ...snapshot,
+    ...identity,
+  }));
+  const refObject = { type: 'commit', sha: B };
+  const getRef = vi.fn(async () => ({ data: { object: refObject } }));
   const auth = vi.fn(async () => ({ token: 'token', tokenType: 'installation' }));
   const installationRepos = vi.fn(async () => ({ data: { total_count: 1, repositories: [] } }));
   const warning = vi.fn();
@@ -104,6 +109,7 @@ function fixture() {
         issues,
         apps: { listReposAccessibleToInstallation: installationRepos },
         pulls: { get: vi.fn(async () => ({ data: pr })) },
+        git: { getRef },
         repos: { getCollaboratorPermissionLevel: permission },
       },
     },
@@ -112,6 +118,8 @@ function fixture() {
     provider: createStatefulReviewPlatform(deps, prepare),
     issues,
     pr,
+    refObject,
+    getRef,
     permission,
     auth,
     installationRepos,
@@ -333,6 +341,143 @@ describe('host git snapshot preparation', () => {
 });
 
 describe('GitHub canonical state', () => {
+  it('pins the actual named base tip despite stale PR metadata without resetting state', async () => {
+    const f = fixture();
+    const previous = state();
+    previous.revision = 8;
+    previous.completedReviews = 7;
+    previous.actionableRounds = 3;
+    previous.nextFindingId = 12;
+    const before = structuredClone(previous);
+    const pinned = await f.provider.snapshot(previous);
+    expect(pinned).toEqual(snapshot);
+    expect(pinned.baseSha).not.toBe(f.pr.base.sha);
+    expect(pinned.headSha).toBe(H);
+    expect(pinned.mergeBaseSha).toBe(M);
+    expect(f.getRef).toHaveBeenCalledWith({ owner: 'owner', repo: 'repo', ref: 'heads/main' });
+    expect(f.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ baseSha: B, baseRef: 'main', headSha: H }),
+      previous,
+      'https://github.com/owner/repo.git',
+      'token'
+    );
+    expect(previous).toEqual(before);
+    await f.provider.publish(null, pinned, state(), renderReviewComment(state()));
+    expect(f.getRef).toHaveBeenCalledTimes(2);
+    expect(f.issues.createComment).toHaveBeenCalledOnce();
+  });
+  it.each(['movement', 'retarget'])(
+    'rejects base %s after snapshot before any comment mutation',
+    async change => {
+      const f = fixture();
+      const body = renderReviewComment(state());
+      f.setComments([comment(body)]);
+      const expected = await f.provider.loadState();
+      const pinned = await f.provider.snapshot(expected!.state);
+      if (change === 'movement') {
+        f.refObject.sha = 'f'.repeat(40);
+      } else {
+        // Retargeting must be rejected even when both branches point at the same commit.
+        f.pr.base.ref = 'release/stable';
+      }
+      await expect(f.provider.publish(expected, pinned, state(), body)).rejects.toThrow('Stale');
+      expect(f.pr.base.sha).toBe('7'.repeat(40));
+      expect(f.getRef).toHaveBeenLastCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        ref: change === 'retarget' ? 'heads/release/stable' : 'heads/main',
+      });
+      expect(f.issues.createComment).not.toHaveBeenCalled();
+      expect(f.issues.updateComment).not.toHaveBeenCalled();
+      expect(await f.provider.loadState()).toEqual(expected);
+    }
+  );
+  it('snapshots a retargeted PR using its new named branch', async () => {
+    const f = fixture();
+    f.pr.base.ref = 'release/stable';
+    f.refObject.sha = 'f'.repeat(40);
+    const pinned = await f.provider.snapshot(state());
+    expect(pinned.baseRef).toBe('release/stable');
+    expect(pinned.baseSha).toBe('f'.repeat(40));
+    expect(f.getRef).toHaveBeenCalledWith({
+      owner: 'owner',
+      repo: 'repo',
+      ref: 'heads/release/stable',
+    });
+  });
+  it.each(['snapshot', 'publish'])('fails closed on a missing base ref during %s', async phase => {
+    const f = fixture();
+    const pinned = await f.provider.snapshot(null);
+    f.getRef.mockRejectedValue(new Error('404: Reference does not exist'));
+    f.prepare.mockClear();
+    await expect(
+      phase === 'snapshot'
+        ? f.provider.snapshot(null)
+        : f.provider.publish(null, pinned, state(), renderReviewComment(state()))
+    ).rejects.toThrow('404');
+    expect(f.prepare).not.toHaveBeenCalled();
+    expect(f.issues.createComment).not.toHaveBeenCalled();
+    expect(f.issues.updateComment).not.toHaveBeenCalled();
+  });
+  it.each([
+    { type: 'tag', sha: B },
+    { type: 'tree', sha: B },
+    { type: 'commit', sha: '' },
+    { type: 'commit', sha: 'b'.repeat(39) },
+    { type: 'commit', sha: 'b'.repeat(41) },
+    { type: 'commit', sha: 'B'.repeat(40) },
+    { type: 'commit', sha: 'g'.repeat(40) },
+    { type: 'commit', sha: `${B}\n` },
+    {},
+    null,
+  ])('fails closed on invalid ref object %j', async object => {
+    const f = fixture();
+    f.getRef.mockResolvedValue({ data: { object: object as typeof f.refObject } });
+    await expect(f.provider.snapshot(null)).rejects.toThrow('Invalid live base ref commit');
+    await expect(
+      f.provider.publish(null, snapshot, state(), renderReviewComment(state()))
+    ).rejects.toThrow('Invalid live base ref commit');
+    expect(f.prepare).not.toHaveBeenCalled();
+    expect(f.issues.createComment).not.toHaveBeenCalled();
+    expect(f.issues.updateComment).not.toHaveBeenCalled();
+  });
+  it.each([
+    '',
+    '/',
+    '/main',
+    'main/',
+    'a//b',
+    '../main',
+    'a/../main',
+    '.hidden',
+    'a/.hidden',
+    'main.lock',
+    'a.lock/b',
+    'main.',
+    'main..old',
+    'main@{1}',
+    '@',
+    'main\n',
+    'main branch',
+    'main:other',
+    'main?other',
+    'main*',
+    'main[0]',
+    'main\\other',
+    'main~1',
+    'main^',
+  ])('rejects malformed base ref %j before resolving it', async ref => {
+    const f = fixture();
+    f.pr.base.ref = ref;
+    await expect(f.provider.snapshot(null)).rejects.toThrow('Invalid live base ref');
+    await expect(
+      f.provider.publish(null, snapshot, state(), renderReviewComment(state()))
+    ).rejects.toThrow('Invalid live base ref');
+    expect(f.getRef).not.toHaveBeenCalled();
+    expect(f.prepare).not.toHaveBeenCalled();
+    expect(f.issues.createComment).not.toHaveBeenCalled();
+    expect(f.issues.updateComment).not.toHaveBeenCalled();
+  });
   it('ignores untrusted prose quoting a marker instead of treating it as canonical state', async () => {
     const f = fixture();
     f.setComments([
@@ -382,7 +527,7 @@ describe('GitHub canonical state', () => {
         f.pr.head.sha = 'f'.repeat(40);
       }
       if (change === 'base') {
-        f.pr.base.sha = 'f'.repeat(40);
+        f.refObject.sha = 'f'.repeat(40);
       }
       if (change === 'ref') {
         f.pr.base.ref = 'other';

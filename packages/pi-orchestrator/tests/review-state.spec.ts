@@ -5,6 +5,7 @@ import {
   parseReviewComment,
   parseReviewState,
   renderReviewComment,
+  renderIncompleteReview,
   reviewHash,
 } from '../src/review/state';
 import type {
@@ -168,6 +169,29 @@ describe('stateful finding ledger', () => {
         'd'
       )
     ).toThrow('cannot accept risk');
+  });
+
+  test('incomplete summaries preserve candidate evidence without a canonical marker or clean decision', () => {
+    const prior = advance(null, [finding()]);
+    const before = structuredClone(prior);
+    const result = {
+      ...submission([
+        finding({ id: 'F1', lifecycle: 'fixed', dispositionReason: 'Unverified claim.' }),
+      ]),
+      coverage: 'incomplete' as const,
+      coverageNotes: 'Missing external source.',
+    };
+    const body = renderIncompleteReview(snapshot, result, prior);
+    expect(body).toContain('Missing external source.');
+    expect(body).toContain('Successful checkpoint remains revision 1');
+    expect(body).toContain('Disposition claim (not applied): Unverified claim.');
+    expect(body).toContain(result.findings[0]!.evidence);
+    expect(body).not.toContain('<!-- pi-stateful-review:v1 -->');
+    expect(body).not.toContain('PASS:');
+    expect(prior).toEqual(before);
+    expect(renderIncompleteReview(snapshot, { ...result, findings: [] }, null)).toContain(
+      'none was created'
+    );
   });
 
   test('incomplete coverage never advances the checkpoint', () => {

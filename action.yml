@@ -215,9 +215,11 @@ runs:
 
 outputs:
   review_outcome:
-    description: 'Stateful result: reviewed, unchanged, or needs_human. Not a GitHub approval or merge gate.'
+    description: 'Stateful result: reviewed, unchanged, needs_human, or incomplete. Incomplete remains non-passing and never advances the checkpoint.'
   review_revision:
     description: 'Last committed canonical state revision; unchanged on failed reviews.'
+  review_result:
+    description: 'JSON incomplete report: outcome, pinned snapshot, checkpointRevision, and submission with coverage notes/uncommitted evidence. No finding dispositions are applied.'
   response:
     description: 'The main agent response text'
   success:

@@ -226,6 +226,50 @@ function display(value: string): string {
     .replace(/[\r\n]+/g, ' ');
 }
 
+export function renderIncompleteReview(
+  snapshot: ReviewSnapshot,
+  rawResult: unknown,
+  checkpoint: ReviewState | null
+): string {
+  const result = parseReviewSubmission(rawResult);
+  if (result.coverage !== 'incomplete') {
+    throw new Error('An incomplete report requires incomplete coverage.');
+  }
+  const lines = [
+    '## Incomplete review',
+    `Attempted head: \`${snapshot.headSha}\`; target tip: \`${snapshot.baseSha}\`; merge-base: \`${snapshot.mergeBaseSha}\`.`,
+    `Coverage gap: ${display(result.coverageNotes)}`,
+    checkpoint
+      ? `Successful checkpoint remains revision ${checkpoint.revision} at \`${checkpoint.snapshot.headSha}\`.`
+      : 'No successful checkpoint exists; none was created.',
+    'No finding disposition, review counter, or escalation state was changed. This is not a clean review or an approval.',
+    '',
+    '## Uncommitted evidence candidates',
+  ];
+  if (!result.findings.length) {
+    lines.push('No candidates were submitted; incomplete coverage is not evidence of no defects.');
+  }
+  result.findings.forEach((finding, index) => {
+    lines.push(
+      '',
+      `### Candidate ${index + 1}: ${display(finding.rootCause)}`,
+      `- Claimed ID: ${display(finding.id ?? '(unassigned)')}; origin: ${finding.origin}; lifecycle claim: ${finding.lifecycle}.`,
+      `- Location: ${display(finding.location)}`,
+      `- Evidence: ${display(finding.evidence)}`,
+      `- Origin evidence: ${display(finding.originEvidence)}`,
+      `- Disposition claim (not applied): ${display(finding.dispositionReason || '(none)')}`
+    );
+  });
+  lines.push('', 'INCOMPLETE: coverage gap remains; successful review state was not advanced.');
+  const body = lines.join('\n');
+  if (Buffer.byteLength(body, 'utf8') > 60_000) {
+    throw new Error(
+      'Incomplete review report exceeds the output budget. Shorten the reason/candidate evidence and resubmit with coverage=incomplete; checkpoint unchanged.'
+    );
+  }
+  return body;
+}
+
 export function renderReviewComment(state: ReviewState): string {
   parseReviewState(state);
   const blockers = state.findings.filter(isBlocker);
