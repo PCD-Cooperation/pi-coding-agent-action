@@ -11,6 +11,7 @@ import { describe, expect, test, vi, beforeEach, afterEach } from 'vitest';
 import { Temporal } from '@js-temporal/polyfill';
 import { reviewHash, renderReviewComment } from '../src/review/state';
 import type {
+  ReviewInitializationPermit,
   ReviewSnapshot,
   ReviewStateRecord,
   StatefulReviewPlatform,
@@ -285,6 +286,95 @@ describe('ActionOrchestrator', () => {
       );
       expect(mockGit.createFinalComment).not.toHaveBeenCalled();
       expect(record).toBeNull();
+    });
+
+    test.each([
+      ['opened', 'model error'],
+      ['opened', 'snapshot error'],
+      ['bootstrap', 'incomplete'],
+      ['first-ready', 'incomplete'],
+      ['first-ready', 'missing submission'],
+    ] as const)('retries initialized %s after %s without bootstrap', async (initial, failure) => {
+      let enrollment: ReviewInitializationPermit | null = null;
+      capability.ensureInitialized = async (_previous, authorizeNew) => {
+        if (!enrollment) {
+          enrollment = await authorizeNew();
+          if (!enrollment) {
+            throw new Error('Untracked review requires initialization authorization');
+          }
+        }
+      };
+      const context = mockProvider.getContext();
+      Object.assign(mockProvider, {
+        getContext: () => ({
+          ...context,
+          eventName: 'pull_request_target',
+          payload: { action: initial === 'opened' ? 'opened' : 'ready_for_review' },
+          runAttempt: 1,
+        }),
+      });
+      capability.canInitializeFromDraft = vi.fn(async () => true);
+      const successfulRun = mockPiAgent.run;
+      const firstRun = vi.fn(async () => {
+        expect(enrollment).not.toBeNull();
+        if (failure === 'model error') {
+          throw new Error('Model temporarily unavailable');
+        }
+        return {
+          result: '',
+          sessionStats: undefined,
+          error: undefined,
+          ...(failure === 'missing submission'
+            ? {}
+            : {
+                review: {
+                  coverage: 'incomplete' as const,
+                  coverageNotes: 'Review did not finish.',
+                  findings: [],
+                },
+              }),
+        };
+      });
+      mockPiAgent.run = firstRun;
+      if (failure === 'snapshot error') {
+        vi.mocked(capability.snapshot).mockRejectedValueOnce(new Error('Snapshot unavailable'));
+      }
+      const initialConfig: Partial<PiConfig> =
+        initial === 'bootstrap' ? {} : { reviewControl: 'none', reviewControlReason: '' };
+      if (failure === 'incomplete') {
+        await createOrchestrator(initialConfig).execute();
+        expect(mockOutputSink.setOutput).toHaveBeenCalledWith('success', false);
+      } else {
+        await expect(createOrchestrator(initialConfig).execute()).rejects.toThrow();
+      }
+      expect(enrollment).toEqual({
+        kind: initial,
+        actor: 'maintainer',
+        reason: initial === 'bootstrap' ? 'Start the pilot.' : null,
+      });
+      expect(record).toBeNull();
+      expect(capability.publish).not.toHaveBeenCalled();
+      const authorizationCalls = vi.mocked(capability.authorizeControl).mock.calls.length;
+      const proofCalls = vi.mocked(capability.canInitializeFromDraft).mock.calls.length;
+      Object.assign(mockProvider, {
+        getContext: () => ({
+          ...context,
+          eventName: 'pull_request_target',
+          payload: { action: initial === 'first-ready' ? 'ready_for_review' : 'synchronize' },
+          runAttempt: 2,
+        }),
+      });
+      mockPiAgent.run = successfulRun;
+      await createOrchestrator({ reviewControl: 'none', reviewControlReason: '' }).execute();
+      expect(successfulRun).toHaveBeenCalledOnce();
+      expect(record!.state.completedReviews).toBe(1);
+      expect(record!.state.revision).toBe(1);
+      expect(record!.state.actionableRounds).toBe(0);
+      expect(record!.state.nextFindingId).toBe(1);
+      expect(record!.state.intervention).toBeNull();
+      expect(mockOutputSink.setOutput).toHaveBeenCalledWith('success', true);
+      expect(vi.mocked(capability.authorizeControl).mock.calls).toHaveLength(authorizationCalls);
+      expect(vi.mocked(capability.canInitializeFromDraft).mock.calls).toHaveLength(proofCalls);
     });
 
     test('missing submission still fails without publication', async () => {

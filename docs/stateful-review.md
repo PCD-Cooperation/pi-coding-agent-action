@@ -30,13 +30,13 @@ directory contributes to both the prompt and configuration fingerprint.
 
 Inputs:
 
-| Input | Default | Behavior |
-| --- | --- | --- |
-| `stateful_review` | `false` | Enable the protocol; requires `publish_comment: true` |
-| `review_max_rounds` | `3` | Actionable fix revisions per episode before human reassessment |
-| `review_control` | `none` | `none`, `bootstrap`, `resume`, or `full` |
-| `review_control_reason` | empty | Required for every non-`none` control |
-| `pr_number` | event PR | Set explicitly for manual dispatch |
+| Input                   | Default  | Behavior                                                       |
+| ----------------------- | -------- | -------------------------------------------------------------- |
+| `stateful_review`       | `false`  | Enable the protocol; requires `publish_comment: true`          |
+| `review_max_rounds`     | `3`      | Actionable fix revisions per episode before human reassessment |
+| `review_control`        | `none`   | `none`, `bootstrap`, `resume`, or `full`                       |
+| `review_control_reason` | empty    | Required for every non-`none` control                          |
+| `pr_number`             | event PR | Set explicitly for manual dispatch                             |
 
 Controls authorize the triggering actor through repository collaborator permission
 (`write`, `maintain`, or `admin`), not through PR text, a comment, or PR authorship.
@@ -48,11 +48,12 @@ with the repository/PR, actor and event timestamp bound to the trusted event.
 History is paginated up to 10,000 events; unavailable, malformed or unknown history
 fails closed. A head pushed while the ready event waits is reviewed through the
 normal live snapshot and freshness checks, not rejected merely for differing from
-the event's old head. Re-ready cycles and reruns cannot silently initialize a
-missing ledger. Replaying the original event after state deletion cannot reset the
-budget. Other existing PRs without checkpoints require explicit `bootstrap` and a
-reason; bootstrap cannot replace an existing ledger. Invalid state requires deliberate operator
-recovery, not an automatic reset. Deleting state is not a supported reset procedure.
+the event's old head. Once an authorized pending initialization receipt exists,
+ordinary events and reruns can retry the initial review without another bootstrap.
+Without that receipt, re-ready cycles and reruns cannot infer missing history.
+Untracked legacy PRs still require one explicit `bootstrap` and a reason; bootstrap
+cannot replace an existing ledger or reset tracked published history. Invalid state
+requires deliberate operator recovery, not an automatic reset.
 
 `full` requests whole-PR discovery but does not unpause escalation or erase findings.
 `resume` records human reassessment and starts another bounded episode. It never
@@ -60,9 +61,50 @@ marks a finding fixed or accepts risk. Do not use repeated resumes to automate
 around the limit. Only the most recent intervention is retained in the current
 checkpoint; use external run artifacts/history if a full intervention audit is needed.
 
+## Initialization lifecycle
+
+Before snapshot extraction, dependency discovery or model execution, the host stores
+a separate bot-owned lifecycle receipt and confirms the persistent PR label
+`pi-stateful-review:tracked-v1`. Both use existing issue-write permissions. The receipt
+has its own marker, `<!-- pi-stateful-review-lifecycle:v1 -->`, and does not contain
+model output. Its enrollment permit records the initial automatic/authorized path,
+including an initial bootstrap reason even when that attempt never completes.
+
+- `pending`: initialization was authorized, but no successful checkpoint exists.
+  Snapshot/model failures and incomplete results leave this phase intact. Later
+  ordinary `none` runs retry automatically, even on another readiness event or a
+  rerun; no successful cursor, finding ID or fix-round budget is advanced.
+- `publishing`: a validated candidate is about to be written. The receipt binds its
+  body hash, revision and operation key, plus any prior checkpoint. Exact canonical
+  readback can finish a seal interrupted after the write. A known rejected write
+  can restore the prior phase; an ambiguous write is not permission to start over.
+- `committed`: the receipt binds the successful canonical comment and its hash,
+  revision and operation key. Existing v1 ledgers are adopted without changing their
+  findings, counters, pause state or comment body.
+
+A missing canonical comment after publication, a missing receipt with a tracking
+label but no ledger, duplicate/corrupt receipts, or a conflicting checkpoint fails
+closed, including for `bootstrap`. A valid receipt can repair a missing label; a
+valid existing canonical ledger can repair a missing receipt. The receipt is capped
+at 16 KiB; metadata discovery is bounded and never treats API failure as absence.
+Deleting every independent witness cannot be distinguished from never having been
+tracked; deliberately erasing the label and both comments is unsupported, not a
+reset procedure. Keep all witnesses for diagnosis and recovery.
+
+Strict legacy recovery remains intentional: a failure before any initialization
+receipt is durably written may still need the original authorized first event or
+an explicit bootstrap. This protocol removes repeated bootstrap after recorded
+initialization, not ambiguity before enrollment. Pending retries remain non-passing
+when the actual review fails or is incomplete; no result is forced complete.
+
+Lifecycle comments and tracking labels are inert after rolling back to the prior
+reviewer. Do not delete them as part of rollback. Coordinate version changes so an
+old writer cannot update a checkpoint behind a receipt-aware writer.
+
 ## Review flow
 
-1. Read the dedicated bot-owned comment, validating schema, identity and ledger.
+1. Read the dedicated bot-owned comment, validating schema, identity and ledger;
+   verify/adopt its lifecycle receipt or durably record authorized pending initialization.
 2. Capture head `H`, actual target-ref tip `B`, merge-base `M`, PR intent and
    configuration. Resolve `refs/heads/<baseRef>` through GitHub; an older PR's API
    `base.sha` is not assumed to be the current target tip. Re-resolve the ref before
@@ -88,8 +130,9 @@ checkpoint; use external run artifacts/history if a full intervention audit is n
    incomplete submission is a valid final report, not a request to relabel its
    coverage complete: it fails the run, preserves its reason/candidate evidence in
    outputs and the job summary, and never advances or overwrites canonical state.
-6. Verify the written checkpoint. A publication error is never a reason to create
-   replacement state. Ambiguous write timeouts are reconciled by operation key.
+6. Verify the written checkpoint and seal its lifecycle receipt. A publication error
+   is never a reason to create replacement state. Ambiguous write timeouts are
+   reconciled by exact operation key/body and receipt intent.
 
 Snapshot extraction rejects symlinks/submodules, unsafe paths and case-colliding
 names. It materializes raw, non-executable blobs without attributes/filters/hooks.
@@ -106,7 +149,7 @@ For changed workflow files, the host may stage the exact commit-pinned public
 source of this action: only `PCD-Cooperation/pi-coding-agent-action` and upstream
 `shaftoe/pi-coding-agent-action`. The fixed required files are `action.yml`, the
 orchestrator, the action's Git adapter and GitHub comment publisher. The fixed
-versioned stateful runner, renderer and GitHub state provider are also staged when
+versioned stateful runner, renderer, GitHub state provider and lifecycle implementation are also staged when
 present; only a nonredirected 404 denotes an older version without those files.
 Their absence is disclosed, not evidence that an unknown contract is safe.
 This source-controlled allowlist is maintainer policy, not a PR or model input.
@@ -122,7 +165,7 @@ package is declared as a core runtime dependency for this parsing boundary.
 The fetcher uses only the fixed HTTPS raw-GitHub host, no authentication, cookies,
 or credential forwarding and rejects redirects. Limits remain four references,
 64 KiB per file, 256 KiB total and 45 seconds overall (15 seconds per request),
-with at most seven fixed files per reference. Text is staged as non-executable evidence in temporary
+with at most eight fixed files per reference. Text is staged as non-executable evidence in temporary
 files; it is never imported, installed or executed. Missing or omitted approved
 context is explicit in the manifest and prevents a complete result. Other material
 external contracts still require an honest incomplete report if they cannot be
@@ -200,7 +243,8 @@ The job summary explicitly labels these as claims, not accepted finding disposit
 The 60,000-byte rendered-report budget is checked inside result submission before capture;
 oversized candidates receive a retryable tool error asking for shorter evidence while
 keeping `coverage=incomplete`, rather than losing an already accepted report.
-No canonical comment is created or changed, even if a candidate claims an old finding
+No canonical finding-ledger comment is created or changed (the pending initialization
+receipt remains), even if a candidate claims an old finding
 is fixed or accepted. The canonical summary separately renders `PASS`, `FINDINGS`,
 or `NEEDS_HUMAN` only for successfully committed complete reviews.
 

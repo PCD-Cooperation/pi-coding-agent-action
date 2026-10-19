@@ -9,6 +9,7 @@ import type {
 } from '@alexanderfortin/pi-orchestrator';
 import type { GitHubModuleDeps } from './types';
 import { prepareReviewSnapshot } from './review-snapshot';
+import { createReviewLifecycle } from './review-lifecycle';
 
 const MARKER = '<!-- pi-stateful-review:v1 -->';
 const BOT = 'github-actions[bot]';
@@ -145,8 +146,14 @@ export function createStatefulReviewPlatform(
       }
     }
   }
+  const lifecycle = createReviewLifecycle(deps, loadState);
   return {
     loadState,
+    async ensureInitialized(previous, authorizeNew) {
+      await requireInstallationToken();
+      await live();
+      await lifecycle.ensure(previous, authorizeNew);
+    },
     async canInitializeFromDraft() {
       if (
         context.eventName !== 'pull_request_target' ||
@@ -286,6 +293,7 @@ export function createStatefulReviewPlatform(
       if (actual?.commentId !== expected?.commentId || actual?.body !== expected?.body) {
         throw new Error('Canonical review state changed');
       }
+      await lifecycle.begin(expected, state, body);
       try {
         if (expected) {
           await octokit.rest.issues.updateComment({
@@ -304,8 +312,10 @@ export function createStatefulReviewPlatform(
           recovered.body === body &&
           (!expected || recovered.commentId === expected.commentId)
         ) {
+          await lifecycle.finish(recovered);
           return;
         }
+        await lifecycle.rollbackRejected(expected, error);
         throw error;
       }
       const written = await loadState();
@@ -316,6 +326,7 @@ export function createStatefulReviewPlatform(
       ) {
         throw new Error('Canonical review write could not be verified (GITHUB_TOKEN required)');
       }
+      await lifecycle.finish(written);
     },
   };
 }

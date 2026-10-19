@@ -99,7 +99,9 @@ describe('automatic first draft readiness initialization', () => {
       if (change === 'negative proof') {
         f.platform.canInitializeFromDraft.mockResolvedValue(false);
       }
-      await expect(prepareReview(f.provider, f.config, 'Review')).rejects.toThrow('checkpoint');
+      await expect(prepareReview(f.provider, f.config, 'Review')).rejects.toThrow(
+        change === 'resume' || change === 'full' ? 'existing review ledger' : 'checkpoint'
+      );
       expect(f.platform.snapshot).not.toHaveBeenCalled();
       if (!['missing proof', 'negative proof'].includes(change)) {
         expect(f.platform.canInitializeFromDraft).not.toHaveBeenCalled();

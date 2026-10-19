@@ -19,6 +19,7 @@ const versionedFiles = [
   'packages/pi-orchestrator/src/review/runner.ts',
   'packages/pi-orchestrator/src/review/state.ts',
   'packages/pi-platform-github/src/review-state.ts',
+  'packages/pi-platform-github/src/review-lifecycle.ts',
 ];
 const directories: string[] = [];
 
@@ -74,7 +75,7 @@ describe('approved immutable dependency evidence', () => {
     expect(result.complete).toBe(true);
     expect(result.contexts).toHaveLength(1);
     expect(result.contexts[0]).toMatchObject({ repository: repo, sha });
-    expect(f.fetcher).toHaveBeenCalledTimes(7);
+    expect(f.fetcher).toHaveBeenCalledTimes(8);
     for (const [url, init] of f.fetcher.mock.calls) {
       expect(String(url)).toMatch(
         new RegExp(`^https://raw\\.githubusercontent\\.com/${repo}/${sha}/`)
@@ -87,7 +88,7 @@ describe('approved immutable dependency evidence', () => {
       expect(init).not.toHaveProperty('headers');
       expect(new URL(String(url)).username).toBe('');
     }
-    expect(result.policyVersion).toBe('approved-action-pins-v3');
+    expect(result.policyVersion).toBe('approved-action-pins-v4');
     expect(result.contexts[0]!.files.map(file => file.path)).toEqual([
       ...requiredFiles,
       ...versionedFiles,
@@ -109,7 +110,7 @@ describe('approved immutable dependency evidence', () => {
     const result = await prepareReviewDependencies(f.snapshot, f.options);
     expect(result.complete).toBe(true);
     expect(result.contexts.map(context => context.sha)).toEqual([sha, targetSha]);
-    expect(f.fetcher).toHaveBeenCalledTimes(14);
+    expect(f.fetcher).toHaveBeenCalledTimes(16);
   });
 
   test('fetches only fixed contract paths, never imports or URLs from fetched content', async () => {
@@ -137,7 +138,7 @@ describe('approved immutable dependency evidence', () => {
     const result = await prepareReviewDependencies(f.snapshot, f.options);
     expect(result.complete).toBe(true);
     expect(result.contexts).toHaveLength(2);
-    expect(f.fetcher).toHaveBeenCalledTimes(14);
+    expect(f.fetcher).toHaveBeenCalledTimes(16);
   });
 
   test('simple unified nonworkflow diff and spoofed hunk markers make no network calls', async () => {
@@ -162,7 +163,7 @@ describe('approved immutable dependency evidence', () => {
     const result = await prepareReviewDependencies(f.snapshot, f.options);
     expect(result.complete).toBe(true);
     expect(result.contexts).toHaveLength(2);
-    expect(f.fetcher).toHaveBeenCalledTimes(14);
+    expect(f.fetcher).toHaveBeenCalledTimes(16);
   });
 
   test.each(['.github/workflows/README.md', 'src/\\\\303\\\\251.ts'])(
@@ -194,7 +195,7 @@ describe('approved immutable dependency evidence', () => {
     await writeFile(join(f.snapshot.basePath, path), `uses: ${repo}@${sha}`);
     await writeFile(f.snapshot.fullDiffPath, `diff --git "a/${path}" "b/${path}"\n`);
     expect((await prepareReviewDependencies(f.snapshot, f.options)).complete).toBe(true);
-    expect(f.fetcher).toHaveBeenCalledTimes(7);
+    expect(f.fetcher).toHaveBeenCalledTimes(8);
   });
 
   test.each([
@@ -209,7 +210,7 @@ describe('approved immutable dependency evidence', () => {
     expect(result.complete).toBe(true);
     expect(result.contexts).toHaveLength(1);
     expect(result.contexts[0]).toMatchObject({ repository: repo, sha });
-    expect(f.fetcher).toHaveBeenCalledTimes(7);
+    expect(f.fetcher).toHaveBeenCalledTimes(8);
   });
 
   test('does not interpret run or prompt scalar contents as action mappings', async () => {
@@ -299,7 +300,7 @@ describe('approved immutable dependency evidence', () => {
     const result = await prepareReviewDependencies(f.snapshot, f.options);
     expect(result.complete).toBe(true);
     expect(result.notes.join(' ')).toContain('base workflow absent');
-    expect(f.fetcher).toHaveBeenCalledTimes(7);
+    expect(f.fetcher).toHaveBeenCalledTimes(8);
   });
 
   test('rejects workflow file and directory symlinks', async () => {
@@ -321,7 +322,7 @@ describe('approved immutable dependency evidence', () => {
     expect(f.fetcher).not.toHaveBeenCalled();
   });
 
-  test('limits references to four and requests to 28, noting every omission', async () => {
+  test('limits references to four and requests to 32, noting every omission', async () => {
     const source = Array.from(
       { length: 6 },
       (_, i) => `- uses: ${repo}@${String(i).repeat(40)}`
@@ -329,7 +330,7 @@ describe('approved immutable dependency evidence', () => {
     const f = await fixture(source);
     const result = await prepareReviewDependencies(f.snapshot, f.options);
     expect(result.complete).toBe(false);
-    expect(f.fetcher).toHaveBeenCalledTimes(28);
+    expect(f.fetcher).toHaveBeenCalledTimes(32);
     expect(result.notes.filter(note => note.includes('Reference limit'))).toHaveLength(2);
   });
 
@@ -341,7 +342,7 @@ describe('approved immutable dependency evidence', () => {
     const result = await prepareReviewDependencies(f.snapshot, f.options);
     expect(result.complete).toBe(false);
     expect(result.contexts[0]!.files).toEqual([]);
-    expect(f.fetcher).toHaveBeenCalledTimes(7);
+    expect(f.fetcher).toHaveBeenCalledTimes(8);
   });
 
   test.each(requiredFiles)('missing required contract %s is incomplete', async path => {
@@ -366,7 +367,7 @@ describe('approved immutable dependency evidence', () => {
     expect(result.complete).toBe(true);
     expect(result.contexts[0]!.files.map(file => file.path)).toEqual(requiredFiles);
     expect(result.notes.filter(note => note.startsWith('Versioned contract absent:'))).toHaveLength(
-      3
+      4
     );
   });
 
@@ -382,7 +383,7 @@ describe('approved immutable dependency evidence', () => {
       );
       const result = await prepareReviewDependencies(f.snapshot, f.options);
       expect(result.complete).toBe(false);
-      expect(result.notes.filter(note => note.startsWith('Cannot stage'))).toHaveLength(3);
+      expect(result.notes.filter(note => note.startsWith('Cannot stage'))).toHaveLength(4);
     }
   );
 
@@ -395,7 +396,7 @@ describe('approved immutable dependency evidence', () => {
     });
     const result = await prepareReviewDependencies(f.snapshot, f.options);
     expect(result.complete).toBe(false);
-    expect(result.notes.filter(note => note.startsWith('Cannot stage'))).toHaveLength(7);
+    expect(result.notes.filter(note => note.startsWith('Cannot stage'))).toHaveLength(8);
   });
 
   test
@@ -488,7 +489,7 @@ describe('approved immutable dependency evidence', () => {
     const result = await prepareReviewDependencies(f.snapshot, f.options);
     expect(result.complete).toBe(false);
     expect(result.contexts[0]!.files).toEqual([]);
-    expect(cancel).toHaveBeenCalledTimes(7);
+    expect(cancel).toHaveBeenCalledTimes(8);
   });
 
   test.each(['fetch', 'body'])(

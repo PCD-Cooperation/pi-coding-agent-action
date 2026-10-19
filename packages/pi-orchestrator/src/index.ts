@@ -15,6 +15,7 @@ export type {
   ReviewFinding,
   ReviewState,
   ReviewStateRecord,
+  ReviewInitializationPermit,
   StatefulReviewPlatform,
 } from './review/types';
 export {
