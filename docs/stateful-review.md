@@ -86,7 +86,9 @@ A missing canonical comment after publication, a missing receipt with a tracking
 label but no ledger, duplicate/corrupt receipts, or a conflicting checkpoint fails
 closed, including for `bootstrap`. A valid receipt can repair a missing label; a
 valid existing canonical ledger can repair a missing receipt. The receipt is capped
-at 16 KiB; metadata discovery is bounded and never treats API failure as absence.
+at 16 KiB, with the largest publication envelope reserved at enrollment; an oversized
+control reason is rejected before any receipt/label write, not after creating a stuck
+pending record. Metadata discovery is bounded and never treats API failure as absence.
 Deleting every independent witness cannot be distinguished from never having been
 tracked; deliberately erasing the label and both comments is unsupported, not a
 reset procedure. Keep all witnesses for diagnosis and recovery.
