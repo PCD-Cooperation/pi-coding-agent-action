@@ -172,6 +172,8 @@ describe('real local Git snapshots', () => {
       await git('config', 'user.email', 'fixture@example.invalid');
       await git('config', 'user.name', 'Fixture');
       await writeFile(join(fixturePath, 'base.txt'), 'base\n');
+      await writeFile(join(fixturePath, 'runbook.md'), 'Historical default: legacy\n');
+      await writeFile(join(fixturePath, 'config.json'), '{"default":"legacy"}\n');
       await writeFile(join(fixturePath, '.gitattributes'), '*.txt text eol=crlf filter=evil\n');
       await git('add', '.');
       await git('commit', '-m', 'base');
@@ -185,6 +187,16 @@ describe('real local Git snapshots', () => {
       await git('add', '.');
       await git('commit', '-m', 'divergent head');
       const headSha = await git('rev-parse', 'HEAD');
+      await git('checkout', 'main');
+      await writeFile(join(fixturePath, 'runbook.md'), 'Current default: modern\n');
+      await writeFile(join(fixturePath, 'config.json'), '{"default":"modern"}\n');
+      await git('add', '.');
+      await git('commit', '-m', 'update target contracts');
+      const targetSha = await git('rev-parse', 'HEAD');
+      await writeFile(join(fixturePath, 'runbook.md'), 'Later unreviewed default\n');
+      await git('add', '.');
+      await git('commit', '-m', 'advance named target after pinning');
+      await git('checkout', '--detach', headSha);
       const executed = join(fixturePath, 'filter-executed');
       await git('config', 'filter.evil.smudge', `touch ${executed}`);
       // Only the trusted process adapter changes transport for this local fixture.
@@ -199,7 +211,7 @@ describe('real local Git snapshots', () => {
           { ...options, env: { ...options.env, GIT_ALLOW_PROTOCOL: 'file' } }
         )
       );
-      const identity = { ...snapshot, headSha, baseSha };
+      const identity = { ...snapshot, headSha, baseSha: targetSha };
       const previous = state();
       previous.snapshot.headSha = previousSha;
       previous.snapshot.mergeBaseSha = baseSha;
@@ -207,6 +219,26 @@ describe('real local Git snapshots', () => {
       snapshots.push(dirname(result.headPath));
       expect(result.mode).toBe('incremental');
       expect(result.mergeBaseSha).toBe(baseSha);
+      expect(result.baseSha).toBe(targetSha);
+      expect(new Set([result.headPath, result.basePath, result.targetPath]).size).toBe(3);
+      for (const path of [result.headPath, result.basePath]) {
+        expect(await readFile(join(path, 'runbook.md'), 'utf8')).toBe(
+          'Historical default: legacy\n'
+        );
+        expect(await readFile(join(path, 'config.json'), 'utf8')).toBe('{"default":"legacy"}\n');
+      }
+      expect(await readFile(join(result.targetPath!, 'runbook.md'), 'utf8')).toBe(
+        'Current default: modern\n'
+      );
+      expect(await readFile(join(result.targetPath!, 'config.json'), 'utf8')).toBe(
+        '{"default":"modern"}\n'
+      );
+      await expect(access(join(result.basePath, 'new.txt'))).rejects.toThrow();
+      await expect(access(join(result.targetPath!, 'new.txt'))).rejects.toThrow();
+      const attributionDiff = await readFile(result.fullDiffPath, 'utf8');
+      expect(attributionDiff).toContain('new.txt');
+      expect(attributionDiff).not.toContain('runbook.md');
+      expect(attributionDiff).not.toContain('config.json');
       expect(await readFile(result.incrementalDiffPath!, 'utf8')).toContain('deleted file mode');
       expect(await readFile(result.incrementalDiffPath!, 'utf8')).toContain('obsolete.txt');
       expect(await readFile(result.fullDiffPath, 'utf8')).not.toContain('obsolete.txt');
@@ -276,6 +308,8 @@ describe('host git snapshot preparation', () => {
     try {
       expect(result.mode).toBe('incremental');
       expect(await readFile(`${result.headPath}/file.txt`, 'utf8')).toBe('raw');
+      expect(await readFile(`${result.targetPath}/file.txt`, 'utf8')).toBe('raw');
+      expect(result.targetPath).not.toBe(result.basePath);
       const calls = gitExec.mock.calls.map(call => call[1] as string[]);
       expect(
         calls.some(
@@ -302,6 +336,71 @@ describe('host git snapshot preparation', () => {
     } finally {
       await rm(dirname(result.headPath), { recursive: true, force: true });
     }
+  });
+  it.each([
+    { head: H, base: M, merge: M, reuse: 'base' },
+    { head: H, base: H, merge: M, reuse: 'head' },
+    { head: H, base: B, merge: H, reuse: 'distinct' },
+    { head: H, base: H, merge: H, reuse: 'head' },
+  ])('reuses equal SHA trees safely: $reuse ($base, $merge)', async ({ head, base, merge }) => {
+    mockGit();
+    const implementation = gitExec.getMockImplementation()!;
+    gitExec.mockImplementation(async (command, args, options) =>
+      args.includes('merge-base')
+        ? { stdout: Buffer.from(merge), stderr: Buffer.alloc(0) }
+        : implementation(command, args, options)
+    );
+    const result = await prepareReviewSnapshot(
+      { ...snapshot, headSha: head, baseSha: base },
+      null,
+      'https://github.com/owner/repo.git'
+    );
+    try {
+      expect(result.targetPath).toBe(
+        base === head
+          ? result.headPath
+          : base === merge
+            ? result.basePath
+            : join(dirname(result.headPath), 'target')
+      );
+      if (head === merge) {
+        expect(result.basePath).toBe(result.headPath);
+      }
+      const extracted = gitExec.mock.calls
+        .map(call => call[1] as string[])
+        .filter(args => args.includes('ls-tree'))
+        .map(args => args.at(-1));
+      expect(extracted).toEqual([...new Set([head, merge, base])]);
+      expect(await readFile(join(result.targetPath!, 'file.txt'), 'utf8')).toBe('raw');
+    } finally {
+      await rm(dirname(result.headPath), { recursive: true, force: true });
+    }
+  });
+  it.each([
+    ['symlink', `120000 blob ${'f'.repeat(40)} 3\tlink\0`, 'symlink'],
+    ['submodule', `160000 commit ${'f'.repeat(40)} -\tmodule\0`, 'submodule'],
+    ['bytes', `100644 blob ${'f'.repeat(40)} ${128 * 1024 * 1024 + 1}\tlarge\0`, 'byte limit'],
+    ['files', `100644 blob ${'f'.repeat(40)} 0\tfile\0`.repeat(10_001), 'file limit'],
+    ['blob failure', `100644 blob ${'f'.repeat(40)} 3\tfile\0`, 'target blob unavailable'],
+  ])('cleans the entire snapshot on target %s', async (kind, tree, error) => {
+    mockGit();
+    const implementation = gitExec.getMockImplementation()!;
+    gitExec.mockImplementation(async (command, args, options) => {
+      if (args.includes('ls-tree') && args.at(-1) === B) {
+        return { stdout: Buffer.from(tree), stderr: Buffer.alloc(0) };
+      }
+      if (kind === 'blob failure' && args.includes('cat-file') && args.at(-1) === 'f'.repeat(40)) {
+        throw new Error('target blob unavailable');
+      }
+      return implementation(command, args, options);
+    });
+    await expect(
+      prepareReviewSnapshot(snapshot, null, 'https://github.com/owner/repo.git')
+    ).rejects.toThrow(error);
+    const calls = gitExec.mock.calls.map(call => call[1] as string[]);
+    expect(calls.some(args => args.includes('ls-tree') && args.at(-1) === M)).toBe(true);
+    const gitDir = calls[0]!.find(arg => arg.startsWith('--git-dir='))!.slice('--git-dir='.length);
+    await expect(access(dirname(gitDir))).rejects.toThrow();
   });
   it.each(['unavailable', 'base', 'merge'])(
     'falls back fully for %s without mutating the ledger',

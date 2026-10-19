@@ -251,7 +251,7 @@ export async function prepareReviewDependencies(
   options: DependencyOptions = {}
 ): Promise<ReviewDependencies> {
   const result: ReviewDependencies = {
-    policyVersion: 'approved-action-pins-v2',
+    policyVersion: 'approved-action-pins-v3',
     complete: true,
     contexts: [],
     notes: [],
@@ -280,11 +280,15 @@ export async function prepareReviewDependencies(
   }
   const references = new Map<string, { repository: string; sha: string }>();
   let workflowBytes = 0;
+  const trees: [string, string][] = [
+    ['head', snapshot.headPath],
+    ['base', snapshot.basePath],
+  ];
+  if (snapshot.targetPath && !trees.some(([, root]) => root === snapshot.targetPath)) {
+    trees.push(['target', snapshot.targetPath]);
+  }
   for (const path of paths) {
-    for (const [tree, root] of [
-      ['head', snapshot.headPath],
-      ['base', snapshot.basePath],
-    ] as const) {
+    for (const [tree, root] of trees) {
       let source: Buffer;
       try {
         overall.throwIfAborted();

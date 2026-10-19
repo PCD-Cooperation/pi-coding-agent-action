@@ -18,6 +18,8 @@ export interface ReviewSnapshot extends ReviewIdentity {
   fallbackReason: string | null;
   headPath: string;
   basePath: string;
+  /** Actual target at baseSha; basePath remains the merge-base attribution baseline. */
+  targetPath?: string;
   previousPath: string | null;
   fullDiffPath: string;
   incrementalDiffPath: string | null;

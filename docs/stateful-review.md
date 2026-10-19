@@ -68,6 +68,13 @@ checkpoint; use external run artifacts/history if a full intervention audit is n
    `base.sha` is not assumed to be the current target tip. Re-resolve the ref before
    publication to reject target movement or retargeting.
 3. Stage immutable source trees and complete diff files using trusted host Git.
+   `basePath` is historical merge-base `M`; `headPath` is proposed `H`;
+   `targetPath` is the actual target tip `B` for current integration/contract
+   context. Equal-SHA trees may share a path. These roles are explicit for parent
+   and fresh children: historical M/H workflow/runbook files are not the executing
+   default-branch deployment. Active host initialization semantics and the loaded
+   trusted policy are provided separately. This does not certify a proposed change
+   to the reviewer itself; that implementation still needs ordinary M-to-H review.
    The first pass uses `M -> H`. Incremental passes use the exact endpoint diff
    `P -> H`, where `P` is the last successfully published reviewed head. This is
    deliberately not a triple-dot comparison after a force-push.
@@ -103,7 +110,7 @@ versioned stateful runner, renderer and GitHub state provider are also staged wh
 present; only a nonredirected 404 denotes an older version without those files.
 Their absence is disclosed, not evidence that an unknown contract is safe.
 This source-controlled allowlist is maintainer policy, not a PR or model input.
-Both PR-head and merge-base references are considered. Mutable tags, arbitrary
+PR-head, merge-base and actual-target references are considered for changed workflows. Mutable tags, arbitrary
 repositories/URLs, imports discovered inside fetched code, and additional file
 paths are not resolved.
 

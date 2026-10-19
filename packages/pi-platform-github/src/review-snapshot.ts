@@ -146,7 +146,14 @@ export async function prepareReviewSnapshot(
     }
     const mergeBaseSha = validSha(mergeBases[0]!);
     const headPath = await materialize(identity.headSha, 'head');
-    const basePath = await materialize(mergeBaseSha, 'base');
+    const basePath =
+      mergeBaseSha === identity.headSha ? headPath : await materialize(mergeBaseSha, 'base');
+    const targetPath =
+      identity.baseSha === identity.headSha
+        ? headPath
+        : identity.baseSha === mergeBaseSha
+          ? basePath
+          : await materialize(identity.baseSha, 'target');
     const fullDiffPath = join(root, 'full.diff');
     await writeFile(
       fullDiffPath,
@@ -197,6 +204,7 @@ export async function prepareReviewSnapshot(
       fallbackReason,
       headPath,
       basePath,
+      targetPath,
       previousPath,
       fullDiffPath,
       incrementalDiffPath,
