@@ -12,6 +12,25 @@ import { prepareReviewSnapshot } from './review-snapshot';
 
 const MARKER = '<!-- pi-stateful-review:v1 -->';
 const BOT = 'github-actions[bot]';
+const TIMELINE_EVENTS = new Set(
+  (
+    'assigned unassigned labeled unlabeled commented committed reviewed review_requested ' +
+    'review_request_removed review_dismissed closed reopened merged renamed locked unlocked ' +
+    'milestoned demilestoned referenced cross-referenced mentioned subscribed unsubscribed ' +
+    'head_ref_deleted head_ref_restored head_ref_force_pushed base_ref_changed base_ref_force_pushed ' +
+    'base_ref_deleted connected disconnected converted_note_to_issue added_to_project ' +
+    'moved_columns_in_project removed_from_project marked_as_duplicate unmarked_as_duplicate ' +
+    'automatic_base_change_failed automatic_base_change_succeeded auto_merge_enabled ' +
+    'auto_merge_disabled auto_rebase_enabled auto_squash_enabled added_to_merge_queue ' +
+    'removed_from_merge_queue added_to_stack removed_from_stack ready_for_review ' +
+    'converted_to_draft pinned unpinned transferred parent_issue_added parent_issue_removed ' +
+    'sub_issue_added sub_issue_removed sub_issue_parent_changed blocked_by_added blocked_by_removed ' +
+    'blocking_added blocking_removed'
+  ).split(' ')
+);
+function object(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+}
 type Prepare = (
   identity: Omit<ReviewIdentity, 'mergeBaseSha'>,
   previous: ReviewState | null,
@@ -128,6 +147,75 @@ export function createStatefulReviewPlatform(
   }
   return {
     loadState,
+    async canInitializeFromDraft() {
+      if (
+        context.eventName !== 'pull_request_target' ||
+        context.payload.action !== 'ready_for_review' ||
+        context.runAttempt !== 1
+      ) {
+        return false;
+      }
+      try {
+        const payloadPr = object(context.payload.pull_request);
+        const sender = object(context.payload.sender);
+        if (
+          context.payload.number !== pullNumber ||
+          payloadPr.number !== pullNumber ||
+          payloadPr.draft !== false ||
+          payloadPr.state !== 'open' ||
+          object(context.payload.repository).full_name !== repository ||
+          !context.actor ||
+          sender.login !== context.actor ||
+          !Number.isSafeInteger(sender.id) ||
+          typeof payloadPr.updated_at !== 'string' ||
+          !Number.isFinite(Date.parse(payloadPr.updated_at))
+        ) {
+          return false;
+        }
+        await live();
+        let readyCount = 0;
+        // Initial draft creation emits no conversion event; any conversion proves prior ready history.
+        for (let page = 1; page <= 100; page++) {
+          const { data, headers } = await octokit.rest.issues.listEventsForTimeline({
+            ...repo,
+            issue_number: pullNumber,
+            per_page: 100,
+            page,
+          });
+          if (!Array.isArray(data)) {
+            return false;
+          }
+          for (const item of data) {
+            const event = object(item);
+            if (typeof event.event !== 'string' || !TIMELINE_EVENTS.has(event.event)) {
+              return false;
+            }
+            if (event.event === 'converted_to_draft') {
+              return false;
+            }
+            if (event.event === 'ready_for_review') {
+              const actor = object(event.actor);
+              if (
+                ++readyCount !== 1 ||
+                !Number.isSafeInteger(event.id) ||
+                actor.id !== sender.id ||
+                actor.login !== sender.login ||
+                event.created_at !== payloadPr.updated_at
+              ) {
+                return false;
+              }
+            }
+          }
+          if (data.length < 100 && !headers?.link?.includes('rel="next"')) {
+            return readyCount === 1;
+          }
+        }
+      } catch {
+        // Missing, unsupported or incomplete history cannot establish a first ready transition.
+        return false;
+      }
+      return false;
+    },
     async snapshot(previous) {
       await requireInstallationToken();
       if (previous) {

@@ -133,6 +133,10 @@ export class ActionOrchestrator {
       const agentConfig = prepared
         ? {
             ...this.config,
+            reviewReadContext: {
+              snapshot: prepared.snapshot,
+              dependencies: prepared.dependencies,
+            },
             reviewSubmissionValidator: (candidate: ReviewSubmission) => {
               validateReviewSubmission(prepared, candidate);
             },

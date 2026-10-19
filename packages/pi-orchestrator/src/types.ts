@@ -9,7 +9,8 @@ import type { Temporal } from '@js-temporal/polyfill';
 import type { CacheWarmingMode, McpServerConfig } from '@earendil-works/pi-coding-agent';
 import type { CreateReactionType, PlatformProvider } from './platform';
 import type { OpengistExpiration } from './share/opengist';
-import type { ReviewControl, ReviewSubmission } from './review/types';
+import type { ReviewControl, ReviewSnapshot, ReviewSubmission } from './review/types';
+import type { ReviewDependencies } from './review/dependencies';
 
 /**
  * Platform-neutral logging interface.
@@ -250,6 +251,11 @@ export interface ResourceLoaderConfig extends DiffConfig {
  */
 export interface PiConfig extends DiffConfig {
   statefulReview?: boolean;
+  /** Host-staged read locations only; never populated from model task arguments. */
+  reviewReadContext?: Readonly<{
+    snapshot: Readonly<ReviewSnapshot>;
+    dependencies: Readonly<ReviewDependencies>;
+  }>;
   /** Host-owned transition validation, run before accepting a result-tool submission. */
   reviewSubmissionValidator?: (submission: ReviewSubmission) => void;
   reviewMaxRounds?: number;
