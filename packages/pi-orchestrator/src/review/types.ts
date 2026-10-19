@@ -71,6 +71,7 @@ export interface ReviewStateRecord {
 
 export interface StatefulReviewPlatform {
   loadState(): Promise<ReviewStateRecord | null>;
+  canInitializeFromDraft?(): Promise<boolean>;
   snapshot(previous: ReviewState | null): Promise<ReviewSnapshot>;
   authorizeControl(): Promise<void>;
   publish(

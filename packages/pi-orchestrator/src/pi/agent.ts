@@ -184,6 +184,9 @@ export class Agent {
           },
           this.config.maxReviewSubagents ?? 3,
           {
+            ...(this.config.reviewReadContext
+              ? { readContext: this.config.reviewReadContext }
+              : {}),
             ...(this.config.reviewSubagentModel ? { model: this.config.reviewSubagentModel } : {}),
             ...(this.config.reviewSubagentThinkingLevel
               ? { thinkingLevel: this.config.reviewSubagentThinkingLevel }

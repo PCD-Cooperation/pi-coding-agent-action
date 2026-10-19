@@ -7,7 +7,16 @@ import { parseDocument, visit } from 'yaml';
 import type { ReviewSnapshot } from './types';
 
 const REPOSITORIES = ['PCD-Cooperation/pi-coding-agent-action', 'shaftoe/pi-coding-agent-action'];
-const FILES = ['action.yml', 'packages/pi-orchestrator/src/orchestrator.ts'];
+const FILES = [
+  { path: 'action.yml', optional: false },
+  { path: 'packages/pi-orchestrator/src/orchestrator.ts', optional: false },
+  { path: 'packages/pi-action/src/adapters/git-adapter.ts', optional: false },
+  { path: 'packages/pi-platform-github/src/comments.ts', optional: false },
+  // Stateful review contracts did not exist in older approved action versions.
+  { path: 'packages/pi-orchestrator/src/review/runner.ts', optional: true },
+  { path: 'packages/pi-orchestrator/src/review/state.ts', optional: true },
+  { path: 'packages/pi-platform-github/src/review-state.ts', optional: true },
+];
 const DIFF_LIMIT = 8 * 1024 * 1024;
 const FILE_LIMIT = 64 * 1024;
 const TOTAL_LIMIT = 256 * 1024;
@@ -184,8 +193,9 @@ async function fetchBounded(
   fetcher: typeof fetch,
   url: string,
   signal: AbortSignal,
-  budget: { bytes: number }
-): Promise<Buffer> {
+  budget: { bytes: number },
+  optional: boolean
+): Promise<Buffer | undefined> {
   signal.throwIfAborted();
   const response = await withDeadline(
     fetcher(url, {
@@ -196,6 +206,15 @@ async function fetchBounded(
     }),
     signal
   );
+  if (
+    optional &&
+    response.status === 404 &&
+    !response.redirected &&
+    response.type !== 'opaqueredirect'
+  ) {
+    void response.body?.cancel().catch(() => undefined);
+    return undefined;
+  }
   if (!response.ok || response.redirected || response.type === 'opaqueredirect') {
     void response.body?.cancel().catch(() => undefined);
     throw new Error(`HTTP ${response.status} or redirect rejected`);
@@ -232,7 +251,7 @@ export async function prepareReviewDependencies(
   options: DependencyOptions = {}
 ): Promise<ReviewDependencies> {
   const result: ReviewDependencies = {
-    policyVersion: 'approved-action-pins-v1',
+    policyVersion: 'approved-action-pins-v2',
     complete: true,
     contexts: [],
     notes: [],
@@ -322,15 +341,22 @@ export async function prepareReviewDependencies(
     }
     const context: ReviewDependencies['contexts'][number] = { ...reference, files: [] };
     result.contexts.push(context);
-    for (const path of FILES) {
+    for (const { path, optional } of FILES) {
       try {
         overall.throwIfAborted();
         const content = await fetchBounded(
           options.fetch ?? fetch,
           `https://raw.githubusercontent.com/${reference.repository}/${reference.sha}/${path}`,
           AbortSignal.any([overall, AbortSignal.timeout(15_000)]),
-          budget
+          budget,
+          optional
         );
+        if (content === undefined) {
+          result.notes.push(
+            `Versioned contract absent: ${reference.repository}@${reference.sha}/${path}`
+          );
+          continue;
+        }
         directory ??= await mkdtemp(join(options.tempRoot ?? tmpdir(), 'pi-review-dependencies-'));
         const localPath = join(directory, `${count}-${context.files.length}.txt`);
         await writeFile(localPath, content, { mode: 0o600, flag: 'wx' });

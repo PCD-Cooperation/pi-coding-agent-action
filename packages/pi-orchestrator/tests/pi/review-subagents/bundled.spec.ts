@@ -12,12 +12,13 @@ import {
 import { resolvePiSdkPackagePath } from '../../../../pi-action/scripts/pi-sdk';
 
 test.each([
-  { childModel: 'gpt-6-luna', childThinking: 'high', parentThinking: 'max' },
-  { childModel: 'gpt-6-sol', childThinking: 'medium', parentThinking: 'xhigh' },
+  { childModel: 'gpt-6-luna', childThinking: 'high', parentThinking: 'max', pinned: true },
+  { childModel: 'gpt-6-sol', childThinking: 'medium', parentThinking: 'xhigh', pinned: false },
 ])(
   'standalone bundle honors $childModel/$childThinking children and $parentThinking parent with shared OAuth',
-  async ({ childModel, childThinking, parentThinking }) => {
-    const directory = mkdtempSync(join(tmpdir(), 'pi-review-bundle-'));
+  async ({ childModel, childThinking, parentThinking, pinned }) => {
+    const directory = realpathSync(mkdtempSync(join(tmpdir(), 'pi-review-bundle-')));
+    const snapshotDirectory = realpathSync(mkdtempSync(join(tmpdir(), 'pi-review-pinned-')));
     const outputDir = join(directory, 'dist');
     mkdirSync(outputDir);
     try {
@@ -71,10 +72,12 @@ test.each([
         timeout: 40_000,
         env: {
           ...process.env,
+          PINNED_CONTEXT: String(pinned),
           CHILD_MODEL: childModel,
           CHILD_THINKING: childThinking,
           PARENT_THINKING: parentThinking,
           FIXTURE_DIR: directory,
+          SNAPSHOT_DIR: snapshotDirectory,
           PI_CODING_AGENT_DIR: directory,
           PI_PACKAGE_DIR: join(outputDir, 'pi-sdk'),
           SUBAGENT_ENTRY: join(isolatedPackage, 'index.js'),
@@ -89,10 +92,14 @@ test.each([
         inference: number;
         tokens: number;
         repeatTokens: number;
+        pinnedReads: number;
+        childContexts: number;
         parentRead: { text: string }[];
         report: string;
         totalTokens: number;
       };
+      expect(report.pinnedReads).toBe(pinned ? 2 : 0);
+      expect(report.childContexts).toBe(pinned ? 4 : 0);
       expect(report.exchanges).toBe(1);
       expect(report.masked).toBe(1);
       expect(report.efforts.filter(level => level === childThinking)).toHaveLength(4);
@@ -123,6 +130,7 @@ test.each([
       expect(report.parentRead.map(part => part.text).join('\n')).toContain('current PR evidence');
     } finally {
       rmSync(directory, { recursive: true, force: true });
+      rmSync(snapshotDirectory, { recursive: true, force: true });
     }
   },
   50_000

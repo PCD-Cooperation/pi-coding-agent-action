@@ -142,6 +142,10 @@ describe('ActionOrchestrator', () => {
     test('validates transitions inside the model result tool, then revalidates at commit', async () => {
       mockPiFactory.mockImplementation((config: PiConfig) => {
         expect(config.reviewSubmissionValidator).toBeTypeOf('function');
+        expect(config.reviewReadContext).toEqual({
+          snapshot,
+          dependencies: expect.objectContaining({ complete: true, contexts: [] }),
+        });
         const invalid = {
           coverage: 'complete' as const,
           coverageNotes: 'Inspected.',

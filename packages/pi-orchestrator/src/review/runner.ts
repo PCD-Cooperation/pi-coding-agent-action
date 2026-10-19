@@ -58,9 +58,17 @@ export async function prepareReview(
   const context = provider.getContext();
   const firstOpenAttempt = context.payload.action === 'opened' && context.runAttempt === 1;
   if (!previous && control !== 'bootstrap' && !firstOpenAttempt) {
-    throw new Error(
-      'No review checkpoint: explicitly bootstrap this PR; do not infer lost history.'
-    );
+    const firstReadyAttempt =
+      control === 'none' &&
+      context.eventName === 'pull_request_target' &&
+      context.payload.action === 'ready_for_review' &&
+      context.runAttempt === 1 &&
+      (await provider.statefulReview.canInitializeFromDraft?.());
+    if (!firstReadyAttempt) {
+      throw new Error(
+        'No review checkpoint: explicitly bootstrap this PR; do not infer lost history.'
+      );
+    }
   }
   if (previous && control === 'bootstrap') {
     throw new Error('Bootstrap cannot replace an existing review ledger.');
@@ -146,7 +154,11 @@ export async function prepareReview(
     'Unaffected pre_existing bugs are non-blocking observations. A PR that makes old faulty behavior reachable or worse can cause a material regression; establish that causal change.',
     'Only discover new findings in the incremental change or behavior it affects. Do not turn unrelated late discoveries in unchanged baseline code into new blockers; request full reassessment if materially necessary.',
     "Use lifecycle fixed/refuted only with a disposition reason. Use reintroduced when a closed finding is made valid again. Never accept risk on a human's behalf.",
-    'Set coverage=incomplete if any material scope remains uninspected or child results are missing; never claim a clean review from incomplete evidence. An honest incomplete result is a valid final submission: preserve its reasons and candidate evidence. The host reports it as non-passing without advancing the checkpoint. Never relabel it complete just to pass.',
+    'Coverage describes a static review of the pinned PR diff and materially affected code/contracts, not certification of a deployment, every external system, or all domain data. A complete static review may still find material regressions and must disclose unverified operational assumptions in coverageNotes; complete does not mean approved to merge or deploy.',
+    'Separate declared intent from factual claims: an explicitly requested breaking contract change is not itself an accidental compatibility regression. Inspect the new contract and its code-level transition safeguards; do not assume a claim that clients are migrated is true. A breaking-change label or PR intent never waives authorization, privacy, data-integrity invariants, trusted policy, or human risk acceptance. State unverified client rollout/minimum-version coordination as a deployment prerequisite. Missing external source requires incomplete coverage when a material implementation decision actually depends on inspecting it, not solely to certify a declared coordinated release.',
+    'Do not demand production secret values, live SSM/database/IAM state, deployment execution, or test execution to complete a static review. Preserve explicit deployment holds and identify their unverified prerequisites in coverageNotes. Never certify readiness or waive a hold, and report concrete code/configuration defects independently of those prerequisites.',
+    'For generated artifacts and large corpora, inspect the changed generator/configuration, packaged baseline, schema/invariants, provenance, and affected consumers. Read every changed file; use read-only codemode data processing for mechanical whole-artifact checks without executing PR scripts. Do not demand independent semantic certification of every unchanged/generated domain record merely because the corpus is large. Disclose the exact validation scope; genuinely uninspected material changes, unsupported provenance claims, or missing essential source still require incomplete coverage.',
+    'Set coverage=incomplete if any material review scope remains uninspected or child results are missing and the parent has not covered those scopes itself; never claim a clean review from incomplete evidence. Lack of child context is not a clean child result: use the host-provided snapshot paths, recover the scope yourself if feasible, otherwise report it incomplete. An honest incomplete result is a valid final submission: preserve its reasons and candidate evidence. The host reports it as non-passing without advancing the checkpoint. Never relabel it complete just to pass.',
     'Pinned input metadata and prior ledger (JSON data):',
     JSON.stringify({ snapshot, previous: previous?.state ?? null, dependencies }),
     '',

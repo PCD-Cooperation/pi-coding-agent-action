@@ -72,7 +72,13 @@ function fixture() {
       repo: { full_name: 'owner/repo', clone_url: 'https://github.com/owner/repo.git' },
     },
   };
+  let timeline: unknown[] = [];
   const issues = {
+    listEventsForTimeline: vi.fn(
+      async ({ page, per_page }: { page: number; per_page: number }) => ({
+        data: timeline.slice((page - 1) * per_page, page * per_page),
+      })
+    ),
     listComments: vi.fn(async ({ page, per_page }: { page: number; per_page: number }) => ({
       data: comments.slice((page - 1) * per_page, page * per_page),
     })),
@@ -126,6 +132,9 @@ function fixture() {
     warning,
     prepare,
     context: deps.context,
+    setTimeline: (value: unknown[]) => {
+      timeline = value;
+    },
     setComments: (value: typeof comments) => {
       comments = value;
     },
@@ -337,6 +346,162 @@ describe('host git snapshot preparation', () => {
     await expect(
       prepareReviewSnapshot(snapshot, null, 'https://github.com/owner/repo.git')
     ).rejects.toThrow('symlink');
+  });
+});
+
+function readyFixture() {
+  const f = fixture();
+  Object.assign(f.context, {
+    eventName: 'pull_request_target',
+    runAttempt: 1,
+    payload: {
+      action: 'ready_for_review',
+      number: 1,
+      repository: { full_name: 'owner/repo' },
+      sender: { id: 17, login: 'actor' },
+      pull_request: {
+        number: 1,
+        state: 'open',
+        draft: false,
+        updated_at: '2026-10-17T16:21:03Z',
+        head: { sha: H },
+      },
+    },
+  });
+  const ready = {
+    id: 33529023542,
+    event: 'ready_for_review',
+    created_at: '2026-10-17T16:21:03Z',
+    actor: { id: 17, login: 'actor' },
+  };
+  f.setTimeline([ready]);
+  return { ...f, ready };
+}
+
+describe('first draft readiness proof', () => {
+  it('accepts exactly the first ready transition, including fully paginated history', async () => {
+    const f = readyFixture();
+    expect(await f.provider.canInitializeFromDraft!()).toBe(true);
+    f.issues.listEventsForTimeline.mockClear();
+    f.setTimeline([...Array.from({ length: 200 }, () => ({ event: 'committed' })), f.ready]);
+    expect(await f.provider.canInitializeFromDraft!()).toBe(true);
+    expect(f.issues.listEventsForTimeline).toHaveBeenCalledTimes(3);
+    expect(f.issues.listEventsForTimeline).toHaveBeenLastCalledWith({
+      owner: 'owner',
+      repo: 'repo',
+      issue_number: 1,
+      per_page: 100,
+      page: 3,
+    });
+    expect(f.issues.createComment).not.toHaveBeenCalled();
+  });
+  it.each([
+    { history: [] },
+    { history: [{ event: 'converted_to_draft' }] },
+    { history: [{ event: 'future_unknown_transition' }] },
+    { history: [{}] },
+    { history: [null] },
+  ])('rejects absent or uncertain history $history', async ({ history }) => {
+    const f = readyFixture();
+    f.setTimeline(history);
+    expect(await f.provider.canInitializeFromDraft!()).toBe(false);
+  });
+  it('follows a next-page link even when the current page is short', async () => {
+    const f = readyFixture();
+    f.issues.listEventsForTimeline.mockResolvedValueOnce({
+      data: [f.ready],
+      headers: { link: '<https://api.github.com/next>; rel="next"' },
+    } as { data: unknown[] });
+    f.setTimeline([
+      ...Array.from({ length: 100 }, () => ({ event: 'committed' })),
+      { event: 'converted_to_draft' },
+    ]);
+    expect(await f.provider.canInitializeFromDraft!()).toBe(false);
+    expect(f.issues.listEventsForTimeline).toHaveBeenCalledTimes(2);
+  });
+  it.each([{ id: 18, login: 'actor' }, { id: 17, login: 'forged' }, null])(
+    'rejects a forged or missing timeline actor %j',
+    async actor => {
+      const f = readyFixture();
+      f.setTimeline([{ ...f.ready, actor }]);
+      expect(await f.provider.canInitializeFromDraft!()).toBe(false);
+    }
+  );
+  it('rejects converted/re-ready history even when the checkpoint was deleted', async () => {
+    const f = readyFixture();
+    f.setComments([]);
+    f.setTimeline([{ event: 'converted_to_draft' }, f.ready]);
+    expect(await f.provider.loadState()).toBeNull();
+    expect(await f.provider.canInitializeFromDraft!()).toBe(false);
+    f.setTimeline([f.ready, { ...f.ready, id: 2 }]);
+    expect(await f.provider.canInitializeFromDraft!()).toBe(false);
+    f.setTimeline([
+      f.ready,
+      ...Array.from({ length: 99 }, () => ({ event: 'committed' })),
+      { event: 'converted_to_draft' },
+    ]);
+    expect(await f.provider.canInitializeFromDraft!()).toBe(false);
+  });
+  it('allows a newer head while the first ready event was queued', async () => {
+    const f = readyFixture();
+    f.pr.head.sha = 'f'.repeat(40);
+    expect(await f.provider.canInitializeFromDraft!()).toBe(true);
+  });
+  it.each(['event', 'attempt', 'action', 'actor', 'sender', 'timestamp', 'repository'])(
+    'rejects wrong or forged %s',
+    async change => {
+      const f = readyFixture();
+      const payload = f.context.payload;
+      if (change === 'event') {
+        f.context.eventName = 'workflow_dispatch';
+      }
+      if (change === 'attempt') {
+        f.context.runAttempt = 2;
+      }
+      if (change === 'action') {
+        payload.action = 'synchronize';
+      }
+      if (change === 'actor') {
+        f.context.actor = 'forged';
+      }
+      if (change === 'sender') {
+        payload.sender = { id: 19, login: 'actor' };
+      }
+      if (change === 'timestamp') {
+        f.ready.created_at = '2026-10-17T16:21:04Z';
+      }
+      if (change === 'repository') {
+        payload.repository = { full_name: 'wrong/repo' };
+      }
+      expect(await f.provider.canInitializeFromDraft!()).toBe(false);
+    }
+  );
+  it.each(['closed', 'draft', 'fork'])('rejects ineligible live PR %s', async change => {
+    const f = readyFixture();
+    if (change === 'closed') {
+      f.pr.state = 'closed';
+    }
+    if (change === 'draft') {
+      f.pr.draft = true;
+    }
+    if (change === 'fork') {
+      f.pr.head.repo.full_name = 'fork/repo';
+    }
+    expect(await f.provider.canInitializeFromDraft!()).toBe(false);
+  });
+  it('fails closed on missing/failed history and later pagination errors', async () => {
+    const f = readyFixture();
+    f.issues.listEventsForTimeline.mockResolvedValueOnce({ data: null as unknown as unknown[] });
+    expect(await f.provider.canInitializeFromDraft!()).toBe(false);
+    f.issues.listEventsForTimeline.mockRejectedValueOnce(new Error('unavailable'));
+    expect(await f.provider.canInitializeFromDraft!()).toBe(false);
+    f.setTimeline([f.ready, ...Array.from({ length: 99 }, () => ({ event: 'committed' }))]);
+    f.issues.listEventsForTimeline
+      .mockImplementationOnce(async () => ({
+        data: [f.ready, ...Array.from({ length: 99 }, () => ({ event: 'committed' }))],
+      }))
+      .mockRejectedValueOnce(new Error('page two unavailable'));
+    expect(await f.provider.canInitializeFromDraft!()).toBe(false);
   });
 });
 
