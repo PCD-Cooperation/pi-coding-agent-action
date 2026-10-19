@@ -71,8 +71,18 @@ export interface ReviewStateRecord {
   state: ReviewState;
 }
 
+export interface ReviewInitializationPermit {
+  kind: 'opened' | 'first-ready' | 'bootstrap';
+  actor: string | null;
+  reason: string | null;
+}
+
 export interface StatefulReviewPlatform {
   loadState(): Promise<ReviewStateRecord | null>;
+  ensureInitialized?(
+    previous: ReviewStateRecord | null,
+    authorizeNew: () => Promise<ReviewInitializationPermit | null>
+  ): Promise<void>;
   canInitializeFromDraft?(): Promise<boolean>;
   snapshot(previous: ReviewState | null): Promise<ReviewSnapshot>;
   authorizeControl(): Promise<void>;

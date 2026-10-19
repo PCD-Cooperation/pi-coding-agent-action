@@ -16,6 +16,7 @@ const FILES = [
   { path: 'packages/pi-orchestrator/src/review/runner.ts', optional: true },
   { path: 'packages/pi-orchestrator/src/review/state.ts', optional: true },
   { path: 'packages/pi-platform-github/src/review-state.ts', optional: true },
+  { path: 'packages/pi-platform-github/src/review-lifecycle.ts', optional: true },
 ];
 const DIFF_LIMIT = 8 * 1024 * 1024;
 const FILE_LIMIT = 64 * 1024;
@@ -251,7 +252,7 @@ export async function prepareReviewDependencies(
   options: DependencyOptions = {}
 ): Promise<ReviewDependencies> {
   const result: ReviewDependencies = {
-    policyVersion: 'approved-action-pins-v3',
+    policyVersion: 'approved-action-pins-v4',
     complete: true,
     contexts: [],
     notes: [],

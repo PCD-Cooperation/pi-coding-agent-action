@@ -20,6 +20,7 @@ import { createStatefulReviewPlatform } from '../src/review-state';
 const H = 'a'.repeat(40);
 const B = 'b'.repeat(40);
 const M = 'c'.repeat(40);
+const MARKER = '<!-- pi-stateful-review:v1 -->';
 const snapshot: ReviewSnapshot = {
   repository: 'owner/repo',
   pullNumber: 1,
@@ -59,6 +60,9 @@ function state(): ReviewState {
 }
 function fixture() {
   let comments: ReturnType<typeof comment>[] = [];
+  let nextCommentId = 1000;
+  const labels = new Map<string, { name: string; color: string; description?: string }>();
+  const issueLabels = new Set<string>();
   const pr = {
     state: 'open',
     draft: false,
@@ -83,13 +87,36 @@ function fixture() {
       data: comments.slice((page - 1) * per_page, page * per_page),
     })),
     createComment: vi.fn(async ({ body }: { body: string }) => {
-      comments.push(comment(body));
-      return { data: comments.at(-1) };
+      const created = comment(body, undefined, nextCommentId++);
+      comments.push(created);
+      return { data: created };
     }),
-    updateComment: vi.fn(async ({ body }: { body: string }) => {
-      comments = [comment(body)];
-      return { data: comments[0] };
+    updateComment: vi.fn(async ({ comment_id, body }: { comment_id: number; body: string }) => {
+      const existing = comments.find(item => item.id === comment_id);
+      if (!existing) {
+        throw Object.assign(new Error('Comment not found'), { status: 404 });
+      }
+      existing.body = body;
+      return { data: existing };
     }),
+    getLabel: vi.fn(async ({ name }: { name: string }) => {
+      const label = labels.get(name);
+      if (!label) {
+        throw Object.assign(new Error('Label not found'), { status: 404 });
+      }
+      return { data: label };
+    }),
+    createLabel: vi.fn(async (label: { name: string; color: string; description?: string }) => {
+      labels.set(label.name, label);
+      return { data: label };
+    }),
+    addLabels: vi.fn(async ({ labels: names }: { labels: string[] }) => {
+      names.forEach(name => issueLabels.add(name));
+      return { data: [...issueLabels].map(name => labels.get(name) ?? { name }) };
+    }),
+    listLabelsOnIssue: vi.fn(async () => ({
+      data: [...issueLabels].map(name => labels.get(name) ?? { name }),
+    })),
   };
   const permission = vi.fn(async () => ({ data: { permission: 'write' } }));
   const prepare = vi.fn(async (identity: Omit<ReviewIdentity, 'mergeBaseSha'>) => ({
@@ -120,8 +147,22 @@ function fixture() {
       },
     },
   } as unknown as GitHubModuleDeps;
+  const newPlatform = () => createStatefulReviewPlatform(deps, prepare);
+  const provider = newPlatform();
   return {
-    provider: createStatefulReviewPlatform(deps, prepare),
+    provider,
+    newPlatform,
+    initialize: async () =>
+      provider.ensureInitialized!(await provider.loadState(), async () => ({
+        kind: 'bootstrap',
+        actor: 'actor',
+        reason: 'Initialize provider test',
+      })),
+    comments: () => comments,
+    canonicalCreates: () =>
+      issues.createComment.mock.calls.filter(([{ body }]) => body.startsWith(MARKER)),
+    canonicalUpdates: () =>
+      issues.updateComment.mock.calls.filter(([{ body }]) => body.startsWith(MARKER)),
     issues,
     pr,
     refObject,
@@ -604,6 +645,160 @@ describe('first draft readiness proof', () => {
   });
 });
 
+describe('GitHub review initialization receipts', () => {
+  it('requires a permit for a completely untracked PR before any receipt or snapshot work', async () => {
+    const f = fixture();
+    const authorizeNew = vi.fn(async () => null);
+    await expect(f.provider.ensureInitialized!(null, authorizeNew)).rejects.toThrow();
+    expect(authorizeNew).toHaveBeenCalledOnce();
+    expect(f.issues.createComment).not.toHaveBeenCalled();
+    expect(f.issues.addLabels).not.toHaveBeenCalled();
+    expect(f.prepare).not.toHaveBeenCalled();
+  });
+
+  it('adopts valid legacy state and updates its canonical ID independently from the receipt', async () => {
+    const f = fixture();
+    f.setComments([comment(renderReviewComment(state()))]);
+    const previous = await f.provider.loadState();
+    const authorizeNew = vi.fn(async () => null);
+    await f.provider.ensureInitialized!(previous, authorizeNew);
+    expect(authorizeNew).not.toHaveBeenCalled();
+    const next = state();
+    next.revision++;
+    next.completedReviews++;
+    next.operationKey = 'f'.repeat(64);
+    await f.provider.publish(previous, snapshot, next, renderReviewComment(next));
+    expect(await f.provider.loadState()).toEqual({
+      commentId: previous!.commentId,
+      body: renderReviewComment(next),
+      state: next,
+    });
+    expect(f.canonicalCreates()).toHaveLength(0);
+    expect(f.canonicalUpdates()).toHaveLength(1);
+    expect(f.comments()).toHaveLength(2);
+    await f.newPlatform().ensureInitialized!(await f.provider.loadState(), authorizeNew);
+    expect(authorizeNew).not.toHaveBeenCalled();
+  });
+
+  it('retries a definitive initial rejection on a fresh provider without a new permit', async () => {
+    const f = fixture();
+    await f.initialize();
+    const rejected = Object.assign(new Error('Validation failed'), { status: 422 });
+    f.issues.createComment.mockRejectedValueOnce(rejected);
+    await expect(
+      f.provider.publish(null, snapshot, state(), renderReviewComment(state()))
+    ).rejects.toBe(rejected);
+    expect(await f.provider.loadState()).toBeNull();
+    expect(f.canonicalCreates()).toHaveLength(1);
+
+    const retry = f.newPlatform();
+    const authorizeNew = vi.fn(async () => null);
+    await retry.ensureInitialized!(null, authorizeNew);
+    expect(authorizeNew).not.toHaveBeenCalled();
+    await retry.publish(null, snapshot, state(), renderReviewComment(state()));
+    expect(f.canonicalCreates()).toHaveLength(2);
+    expect((await retry.loadState())?.state).toEqual(state());
+  });
+
+  it('repairs a failed seal against the exact committed canonical cursor on a fresh provider', async () => {
+    const f = fixture();
+    await f.initialize();
+    const next = state();
+    next.revision = 7;
+    next.completedReviews = 7;
+    next.actionableRounds = 3;
+    next.nextFindingId = 12;
+    const body = renderReviewComment(next);
+    const sealError = new Error('Receipt seal unavailable');
+    const update = f.issues.updateComment.getMockImplementation()!;
+    f.issues.updateComment.mockImplementation(async args => {
+      if (f.comments().some(item => item.body === body) && !args.body.startsWith(MARKER)) {
+        throw sealError;
+      }
+      return update(args);
+    });
+    await expect(f.provider.publish(null, snapshot, next, body)).rejects.toBe(sealError);
+    const written = await f.provider.loadState();
+    expect(written?.state).toEqual(next);
+    expect(f.canonicalCreates()).toHaveLength(1);
+    expect(f.comments()).toHaveLength(2);
+
+    f.issues.updateComment.mockImplementation(update);
+    const repair = f.newPlatform();
+    const authorizeNew = vi.fn(async () => null);
+    await repair.ensureInitialized!(written, authorizeNew);
+    expect(authorizeNew).not.toHaveBeenCalled();
+    expect(await repair.loadState()).toEqual(written);
+    expect(f.canonicalCreates()).toHaveLength(1);
+    expect(f.canonicalUpdates()).toHaveLength(0);
+    expect(f.prepare).not.toHaveBeenCalled();
+    const sealed = f.comments().find(item => !item.body.startsWith(MARKER))!.body;
+    await f.newPlatform().ensureInitialized!(written, authorizeNew);
+    expect(f.comments().find(item => !item.body.startsWith(MARKER))!.body).toBe(sealed);
+  });
+
+  it('rejects a missing committed canonical even with a bootstrap permit', async () => {
+    const f = fixture();
+    await f.initialize();
+    await f.provider.publish(null, snapshot, state(), renderReviewComment(state()));
+    f.setComments(f.comments().filter(item => !item.body.startsWith(MARKER)));
+    const authorizeNew = vi.fn(async () => ({
+      kind: 'bootstrap' as const,
+      actor: 'actor',
+      reason: 'Explicit retry',
+    }));
+    await expect(f.newPlatform().ensureInitialized!(null, authorizeNew)).rejects.toThrow();
+    expect(authorizeNew).not.toHaveBeenCalled();
+    expect(f.canonicalCreates()).toHaveLength(1);
+    expect(f.prepare).not.toHaveBeenCalled();
+  });
+
+  it('rejects a stale snapshot before advancing the pending publishing receipt', async () => {
+    const f = fixture();
+    await f.initialize();
+    const receipts = structuredClone(f.comments());
+    const updates = f.issues.updateComment.mock.calls.length;
+    f.refObject.sha = 'f'.repeat(40);
+    await expect(
+      f.provider.publish(null, snapshot, state(), renderReviewComment(state()))
+    ).rejects.toThrow('Stale');
+    expect(f.comments()).toEqual(receipts);
+    expect(f.issues.updateComment).toHaveBeenCalledTimes(updates);
+    expect(f.canonicalCreates()).toHaveLength(0);
+    await f.newPlatform().ensureInitialized!(null, async () => null);
+  });
+
+  it.each(['authentication', 'closed', 'draft', 'fork'])(
+    'rejects ineligible initialization %s before authorizing or writing a receipt',
+    async change => {
+      const f = fixture();
+      if (change === 'authentication') {
+        f.installationRepos.mockRejectedValue(new Error('Not an installation token'));
+      } else if (change === 'closed') {
+        f.pr.state = 'closed';
+      } else if (change === 'draft') {
+        f.pr.draft = true;
+      } else {
+        f.pr.head.repo.full_name = 'fork/repo';
+      }
+      const authorizeNew = vi.fn(async () => null);
+      await expect(f.provider.ensureInitialized!(null, authorizeNew)).rejects.toThrow();
+      expect(authorizeNew).not.toHaveBeenCalled();
+      expect(f.issues.createComment).not.toHaveBeenCalled();
+      expect(f.issues.addLabels).not.toHaveBeenCalled();
+      expect(f.prepare).not.toHaveBeenCalled();
+    }
+  );
+
+  it('does not allow direct publication to bypass initialization', async () => {
+    const f = fixture();
+    await expect(
+      f.provider.publish(null, snapshot, state(), renderReviewComment(state()))
+    ).rejects.toThrow();
+    expect(f.canonicalCreates()).toHaveLength(0);
+  });
+});
+
 describe('GitHub canonical state', () => {
   it('pins the actual named base tip despite stale PR metadata without resetting state', async () => {
     const f = fixture();
@@ -613,6 +808,8 @@ describe('GitHub canonical state', () => {
     previous.actionableRounds = 3;
     previous.nextFindingId = 12;
     const before = structuredClone(previous);
+    await f.initialize();
+    f.getRef.mockClear();
     const pinned = await f.provider.snapshot(previous);
     expect(pinned).toEqual(snapshot);
     expect(pinned.baseSha).not.toBe(f.pr.base.sha);
@@ -628,7 +825,7 @@ describe('GitHub canonical state', () => {
     expect(previous).toEqual(before);
     await f.provider.publish(null, pinned, state(), renderReviewComment(state()));
     expect(f.getRef).toHaveBeenCalledTimes(2);
-    expect(f.issues.createComment).toHaveBeenCalledOnce();
+    expect(f.canonicalCreates()).toHaveLength(1);
   });
   it.each(['movement', 'retarget'])(
     'rejects base %s after snapshot before any comment mutation',
@@ -832,9 +1029,10 @@ describe('GitHub canonical state', () => {
   it('uses server authentication rather than Octokit token-format guesses', async () => {
     const f = fixture();
     f.auth.mockResolvedValue({ token: 'opaque-action-token', tokenType: 'oauth' });
+    await f.initialize();
     await f.provider.publish(null, snapshot, state(), renderReviewComment(state()));
     expect(f.installationRepos).toHaveBeenCalledWith({ per_page: 1 });
-    expect(f.issues.createComment).toHaveBeenCalledOnce();
+    expect(f.canonicalCreates()).toHaveLength(1);
   });
   it('rejects unverified snapshot authentication before preparing sources', async () => {
     const f = fixture();
@@ -844,30 +1042,35 @@ describe('GitHub canonical state', () => {
   });
   it('rejects unexpected read-back ownership without creating a replacement', async () => {
     const f = fixture();
+    await f.initialize();
     f.issues.createComment.mockImplementationOnce(async ({ body }) => {
-      f.setComments([comment(body, 'different-app[bot]')]);
+      f.comments().push(comment(body, 'different-app[bot]'));
       return { data: comment(body) };
     });
     await expect(
       f.provider.publish(null, snapshot, state(), renderReviewComment(state()))
     ).rejects.toThrow('could not be verified');
-    expect(f.issues.createComment).toHaveBeenCalledTimes(1);
+    expect(f.canonicalCreates()).toHaveLength(1);
   });
   it('creates once and reads back', async () => {
     const f = fixture();
+    await f.initialize();
     await f.provider.publish(null, snapshot, state(), renderReviewComment(state()));
-    expect(f.issues.createComment).toHaveBeenCalledTimes(1);
-    expect(f.issues.listComments).toHaveBeenCalledTimes(2);
+    expect(f.canonicalCreates()).toHaveLength(1);
+    expect((await f.provider.loadState())?.body).toBe(renderReviewComment(state()));
+    expect(f.comments()).toHaveLength(2);
   });
   it('reconciles ambiguous successful creates without retry', async () => {
     const f = fixture();
     const body = renderReviewComment(state());
+    await f.initialize();
     f.issues.createComment.mockImplementationOnce(async () => {
-      f.setComments([comment(body)]);
+      f.comments().push(comment(body));
       throw new Error('timeout');
     });
     await f.provider.publish(null, snapshot, state(), body);
-    expect(f.issues.createComment).toHaveBeenCalledTimes(1);
+    expect(f.canonicalCreates()).toHaveLength(1);
+    await f.newPlatform().ensureInitialized!(await f.provider.loadState(), async () => null);
   });
   it('never replaces failed updates or retries failed creates', async () => {
     const f = fixture();
@@ -878,15 +1081,24 @@ describe('GitHub canonical state', () => {
     next.revision++;
     next.completedReviews++;
     next.operationKey = 'f'.repeat(64);
-    f.issues.updateComment.mockRejectedValue(new Error('denied'));
+    await f.initialize();
+    const update = f.issues.updateComment.getMockImplementation()!;
+    f.issues.updateComment.mockImplementation(async args => {
+      if (args.body.startsWith(MARKER)) {
+        throw new Error('denied');
+      }
+      return update(args);
+    });
     await expect(
       f.provider.publish(expected, snapshot, next, renderReviewComment(next))
     ).rejects.toThrow('denied');
-    expect(f.issues.createComment).not.toHaveBeenCalled();
-    f.setComments([]);
-    f.issues.createComment.mockRejectedValue(new Error('timeout'));
-    await expect(f.provider.publish(null, snapshot, state(), body)).rejects.toThrow('timeout');
-    expect(f.issues.createComment).toHaveBeenCalledTimes(1);
+    expect(f.canonicalCreates()).toHaveLength(0);
+    expect(f.canonicalUpdates()).toHaveLength(1);
+    const fresh = fixture();
+    await fresh.initialize();
+    fresh.issues.createComment.mockRejectedValue(new Error('timeout'));
+    await expect(fresh.provider.publish(null, snapshot, state(), body)).rejects.toThrow('timeout');
+    expect(fresh.canonicalCreates()).toHaveLength(1);
   });
   it('never sends transport credentials to a server_url permalink override', async () => {
     const f = fixture();

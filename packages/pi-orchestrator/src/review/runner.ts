@@ -13,7 +13,13 @@ import { prepareReviewDependencies } from './dependencies';
 import { REVIEW_RUNTIME_CAPABILITIES, REVIEW_SOURCE_ROLES } from './context';
 import type { PiConfig, PromptResult } from '../types';
 import type { PlatformProvider } from '../platform';
-import type { ReviewSnapshot, ReviewState, ReviewStateRecord, ReviewSubmission } from './types';
+import type {
+  ReviewInitializationPermit,
+  ReviewSnapshot,
+  ReviewState,
+  ReviewStateRecord,
+  ReviewSubmission,
+} from './types';
 
 export interface PreparedReview {
   previous: ReviewStateRecord | null;
@@ -57,25 +63,37 @@ export async function prepareReview(
   }
   const previous = await provider.statefulReview.loadState();
   const context = provider.getContext();
-  const firstOpenAttempt = context.payload.action === 'opened' && context.runAttempt === 1;
-  if (!previous && control !== 'bootstrap' && !firstOpenAttempt) {
-    const firstReadyAttempt =
-      control === 'none' &&
-      context.eventName === 'pull_request_target' &&
-      context.payload.action === 'ready_for_review' &&
-      context.runAttempt === 1 &&
-      (await provider.statefulReview.canInitializeFromDraft?.());
-    if (!firstReadyAttempt) {
-      throw new Error(
-        'No review checkpoint: explicitly bootstrap this PR; do not infer lost history.'
-      );
-    }
-  }
   if (previous && control === 'bootstrap') {
     throw new Error('Bootstrap cannot replace an existing review ledger.');
   }
   if (!previous && (control === 'resume' || control === 'full')) {
     throw new Error('Resume/full requires an existing review ledger.');
+  }
+  const authorizeNew = async (): Promise<ReviewInitializationPermit | null> => {
+    const actor = context.actor ?? null;
+    if (control === 'bootstrap') {
+      return { kind: 'bootstrap', actor, reason };
+    }
+    if (context.payload.action === 'opened' && context.runAttempt === 1) {
+      return { kind: 'opened', actor, reason: null };
+    }
+    if (
+      control === 'none' &&
+      context.eventName === 'pull_request_target' &&
+      context.payload.action === 'ready_for_review' &&
+      context.runAttempt === 1 &&
+      (await provider.statefulReview!.canInitializeFromDraft?.())
+    ) {
+      return { kind: 'first-ready', actor, reason: null };
+    }
+    return null;
+  };
+  if (provider.statefulReview.ensureInitialized) {
+    await provider.statefulReview.ensureInitialized(previous, authorizeNew);
+  } else if (!previous && !(await authorizeNew())) {
+    throw new Error(
+      'No review checkpoint: explicitly bootstrap this PR; do not infer lost history.'
+    );
   }
   const snapshot = await provider.statefulReview.snapshot(previous?.state ?? null);
   const policy = readPolicy(config);
