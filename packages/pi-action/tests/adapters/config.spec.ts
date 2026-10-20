@@ -14,6 +14,7 @@
  */
 
 import { describe, expect, test, beforeEach, vi } from 'vitest';
+import { reviewHash } from '@alexanderfortin/pi-orchestrator';
 import { coreMock } from '../../../pi-orchestrator/tests/helpers/core-mock';
 
 // Register the mock DIRECTLY (hoisted by Vitest) pointing to the shared coreMock
@@ -101,6 +102,104 @@ describe('gatherActionsConfig', () => {
       expect(() => gatherActionsConfig()).toThrow('review_control must');
       mockCore({ stateful_review: 'true', review_control: 'resume' });
       expect(() => gatherActionsConfig()).toThrow('review_control_reason');
+    });
+  });
+
+  describe('coverage review inputs', () => {
+    test.each([false, true])(
+      'disabled coverage preserves legacy config (stateful=%s)',
+      stateful => {
+        const inputs = stateful ? { stateful_review: 'true' } : {};
+        mockCore(inputs);
+        const legacy = gatherActionsConfig();
+        expect(legacy).not.toHaveProperty('reviewCoverage');
+        expect(legacy).not.toHaveProperty('reviewCoverageOptions');
+
+        mockCore({
+          ...inputs,
+          review_coverage: 'false',
+          review_work_concurrency: '3',
+          review_work_max_units: '96',
+        });
+        const disabled = gatherActionsConfig();
+        expect(disabled).toStrictEqual(legacy);
+        expect(reviewHash(disabled)).toBe(reviewHash(legacy));
+
+        mockCore({
+          ...inputs,
+          review_coverage: 'false',
+          review_work_concurrency: '1',
+          review_work_max_units: '1',
+        });
+        expect(gatherActionsConfig()).toStrictEqual(legacy);
+      }
+    );
+
+    test('emits only public coverage options with bounded defaults when enabled', () => {
+      mockCore({ stateful_review: 'true', review_coverage: 'TRUE' });
+      expect(gatherActionsConfig()).toMatchObject({
+        statefulReview: true,
+        publishComment: true,
+        reviewCoverage: true,
+        reviewCoverageOptions: { concurrency: 3, maxUnits: 96 },
+      });
+      expect(gatherActionsConfig().reviewCoverageOptions).toStrictEqual({
+        concurrency: 3,
+        maxUnits: 96,
+      });
+    });
+
+    test.each([
+      ['1', '1', 1, 1],
+      ['2', '48', 2, 48],
+      [' 3 ', ' 96 ', 3, 96],
+    ])('accepts concurrency=%s and max units=%s', (concurrency, maxUnits, workers, units) => {
+      mockCore({
+        stateful_review: 'true',
+        review_coverage: 'true',
+        review_work_concurrency: String(concurrency),
+        review_work_max_units: String(maxUnits),
+      });
+      expect(gatherActionsConfig().reviewCoverageOptions).toStrictEqual({
+        concurrency: workers,
+        maxUnits: units,
+      });
+    });
+
+    test.each(['', 'false'])('requires stateful review when stateful_review=%s', stateful => {
+      mockCore({ review_coverage: 'true', stateful_review: stateful });
+      expect(() => gatherActionsConfig()).toThrow('Coverage review requires stateful_review=true.');
+    });
+
+    test('requires publication when coverage review is enabled', () => {
+      mockCore({
+        stateful_review: 'true',
+        review_coverage: 'true',
+        publish_comment: 'false',
+      });
+      expect(() => gatherActionsConfig()).toThrow('publish_comment=true');
+    });
+
+    describe.each([
+      ['review_work_concurrency', 3],
+      ['review_work_max_units', 96],
+    ] as const)('%s validation', (name, maximum) => {
+      test.each(['0', '-1', '1.5', '1e0', '1worker', 'NaN', 'Infinity', '9007199254740992'])(
+        'rejects invalid integer %s',
+        raw => {
+          mockCore({ stateful_review: 'true', review_coverage: 'true', [name]: raw });
+          expect(() => gatherActionsConfig()).toThrow(
+            `${name} must be a safe integer from 1 to ${maximum}.`
+          );
+        }
+      );
+
+      test('rejects values above the hard cap instead of clamping', () => {
+        mockCore({ stateful_review: 'true', review_coverage: 'true', [name]: String(maximum + 1) });
+        expect(() => gatherActionsConfig()).toThrow(
+          `${name} must be a safe integer from 1 to ${maximum}.`
+        );
+      });
     });
   });
 

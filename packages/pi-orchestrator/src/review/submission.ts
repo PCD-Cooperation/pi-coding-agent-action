@@ -128,4 +128,5 @@ export const STATEFUL_REVIEW_TOOLS: ReadonlySet<string> = new Set([
   'subagent',
   'wait_subagents',
   'submit_review_result',
+  'request_review_followup',
 ]);

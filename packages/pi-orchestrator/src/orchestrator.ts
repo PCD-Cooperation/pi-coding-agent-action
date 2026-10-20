@@ -21,6 +21,7 @@ import {
   type PiAgent,
   type PiAgentFactory,
   type PiConfig,
+  type PromptResult,
   type SessionStats,
 } from './types';
 import { formatCost } from './format';
@@ -31,6 +32,7 @@ import { resolveGistProvider, resolveShareToken } from './share/provider';
 import { prepareReview, commitReview, validateReviewSubmission } from './review/runner';
 import { renderReviewComment, renderIncompleteReview, reviewIdentity } from './review/state';
 import type { ReviewSubmission } from './review/types';
+import { ReviewCoverageRunError, runReviewCoverage } from './review/work-runner';
 
 /**
  * Build the body of the success comment posted at the end of a run.
@@ -105,8 +107,13 @@ export class ActionOrchestrator {
     // Hoisted so the catch block can recover partial usage from a run that
     // threw after consuming tokens. Stays `undefined` until the factory runs.
     let pi: PiAgent | undefined;
+    let coverageStats: SessionStats | undefined;
+    const coverageStarted = Date.now();
 
     try {
+      if (this.config.reviewCoverage && !this.config.statefulReview) {
+        throw new Error('Coverage work requires stateful review.');
+      }
       prompt = await this.git.getPrompt(this.config.promptInput);
       if (!prompt) {
         throw new Error('No prompt found - cannot proceed');
@@ -142,11 +149,28 @@ export class ActionOrchestrator {
             },
           }
         : this.config;
-      pi = this.piAgentFactory(agentConfig, this.logger, this.platformProvider);
-      const response = await pi.run(prepared?.prompt ?? prompt);
+      let response: PromptResult;
+      if (prepared?.coverageOptions) {
+        response = await runReviewCoverage(
+          agentConfig,
+          this.logger,
+          this.platformProvider,
+          this.piAgentFactory,
+          prepared,
+          coverageStarted
+        );
+      } else {
+        pi = this.piAgentFactory(agentConfig, this.logger, this.platformProvider);
+        response = await pi.run(prepared?.prompt ?? prompt);
+      }
       const { result, sessionStats, error } = response;
+      if (prepared?.coverageOptions) {
+        coverageStats = sessionStats;
+      }
 
-      await this.runSessionExports(pi);
+      if (pi) {
+        await this.runSessionExports(pi);
+      }
       await this.runSessionShare();
 
       if (error) {
@@ -196,7 +220,7 @@ export class ActionOrchestrator {
       }
       await this.finalize(finalBody, this.config, startTime, reaction, sessionStats, true);
     } catch (e) {
-      await this.handleUncaughtError(e, startTime, reaction, pi);
+      await this.handleUncaughtError(e, startTime, reaction, pi, coverageStats);
       throw e;
     } finally {
       await this.disposeAgentBestEffort(pi);
@@ -294,13 +318,15 @@ export class ActionOrchestrator {
     e: unknown,
     startTime: Temporal.Instant,
     reaction: CreateReactionType | undefined,
-    pi?: PiAgent
+    pi?: PiAgent,
+    coverageStats?: SessionStats
   ): Promise<void> {
     const errorMessage = e instanceof Error ? e.message : String(e);
 
     // Attempt to recover partial session usage even when prompt() rejected,
     // so token consumption from a failed run isn't silently lost.
-    let sessionStats: SessionStats | undefined;
+    let sessionStats: SessionStats | undefined =
+      e instanceof ReviewCoverageRunError ? e.sessionStats : coverageStats;
     if (pi) {
       try {
         sessionStats = pi.getSessionStats();

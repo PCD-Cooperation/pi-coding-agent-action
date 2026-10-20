@@ -9,7 +9,8 @@
 
 import { describe, expect, test, vi, beforeEach, afterEach } from 'vitest';
 import { Temporal } from '@js-temporal/polyfill';
-import { reviewHash, renderReviewComment } from '../src/review/state';
+import { reviewHash, reviewIdentity, renderReviewComment } from '../src/review/state';
+import type { ReviewWorkRecord, ReviewUnitResult } from '../src/review/work-types';
 import type {
   ReviewInitializationPermit,
   ReviewSnapshot,
@@ -128,6 +129,175 @@ describe('ActionOrchestrator', () => {
 
     afterEach(() => {
       fs.rmSync(fixtureDirectory, { recursive: true, force: true });
+    });
+
+    function coverageFixture(status: 'reviewed' | 'blocked' = 'reviewed') {
+      const patch =
+        'diff --git a/service.py b/service.py\n--- a/service.py\n+++ b/service.py\n@@ -1 +1 @@\n-old\n+new\n';
+      const patchPath = path.join(fixtureDirectory, 'unit.diff');
+      const inventoryPath = path.join(fixtureDirectory, 'coverage-inventory.json');
+      fs.writeFileSync(patchPath, patch);
+      fs.writeFileSync(
+        inventoryPath,
+        JSON.stringify({
+          version: 1,
+          identity: reviewIdentity(snapshot),
+          previousHeadSha: null,
+          incremental: null,
+          full: [
+            {
+              id: reviewHash('file'),
+              path: 'service.py',
+              previousPath: null,
+              status: 'modified',
+              binary: false,
+              oldBlob: 'd'.repeat(40),
+              newBlob: 'e'.repeat(40),
+              oldMode: '100644',
+              newMode: '100644',
+              patchPath,
+              patchBytes: Buffer.byteLength(patch),
+              hunks: [
+                {
+                  index: 0,
+                  patchStartLine: 4,
+                  patchEndLine: 6,
+                  oldStart: 1,
+                  oldLines: 1,
+                  newStart: 1,
+                  newLines: 1,
+                },
+              ],
+            },
+          ],
+        })
+      );
+      const coverageSnapshot = { ...snapshot, coverageInventoryPath: inventoryPath };
+      capability.snapshot = vi.fn(async () => ({ ...coverageSnapshot }));
+      let work: ReviewWorkRecord | null = null;
+      capability.workStore = {
+        load: vi.fn(async () => structuredClone(work)),
+        save: vi.fn(async (expected, state) => {
+          if (expected?.body !== work?.body) {
+            throw new Error('Work conflict');
+          }
+          work = { commentId: 901, body: JSON.stringify(state), state: structuredClone(state) };
+          return structuredClone(work);
+        }),
+      };
+      mockPiFactory.mockImplementation((config: PiConfig) => ({
+        ...mockPiAgent,
+        run: vi.fn(async () => {
+          const sessionStats = {
+            inputTokens: 1,
+            outputTokens: 2,
+            totalTokens: 3,
+            cost: 0.25,
+            version: 'test',
+          };
+          if (config.reviewWorkUnit) {
+            const unit = config.reviewWorkUnit;
+            const result: ReviewUnitResult = {
+              unitId: unit.id,
+              status,
+              coveredSpanIds: status === 'reviewed' ? unit.spans.map(span => span.id) : [],
+              reconciledFindingIds: [],
+              assessment: 'Inspected assigned patch.',
+              limitations: status === 'reviewed' ? [] : ['Essential contract unavailable.'],
+              findings: [],
+              followUps: [],
+            };
+            config.reviewUnitValidator?.(result);
+            return { result: '', error: undefined, sessionStats, reviewUnit: result };
+          }
+          expect(config.reviewCoverageSynthesis).toBe(true);
+          const review = {
+            coverage: 'complete' as const,
+            coverageNotes: 'Integrated unit evidence.',
+            findings: [],
+          };
+          config.reviewSubmissionValidator?.(review);
+          return { result: '', error: undefined, sessionStats, review };
+        }),
+      }));
+      return {
+        store: capability.workStore,
+        snapshot: coverageSnapshot,
+        work: () => structuredClone(work),
+      };
+    }
+
+    test('completes host coverage and synthesis before one canonical publication', async () => {
+      const fixture = coverageFixture();
+      await createOrchestrator({ reviewCoverage: true }).execute();
+      expect(capability.snapshot).toHaveBeenCalledWith(null, { coverage: true });
+      expect(mockPiFactory).toHaveBeenCalledTimes(2);
+      expect(fixture.store.load).toHaveBeenCalledTimes(2);
+      expect(fixture.work()!.state.phase).toBe('ready');
+      expect(capability.publish).toHaveBeenCalledOnce();
+      expect(record!.state.completedReviews).toBe(1);
+      expect(mockOutputSink.setOutput).toHaveBeenCalledWith('cost', 0.5);
+      expect(mockGit.createFinalComment).not.toHaveBeenCalled();
+    });
+
+    test.each(['baseSha', 'intentHash'] as const)(
+      'forces full required coverage when %s changes without a head delta',
+      async field => {
+        const fixture = coverageFixture();
+        await createOrchestrator({ reviewCoverage: true }).execute();
+        const configurationHash = record!.state.configurationHash;
+        fixture.snapshot[field] = field === 'baseSha' ? 'f'.repeat(40) : reviewHash('new intent');
+        fixture.snapshot.mode = 'incremental';
+        fixture.snapshot.previousPath = fixture.snapshot.headPath;
+        fixture.snapshot.incrementalDiffPath = path.join(fixtureDirectory, 'incremental.diff');
+        fs.writeFileSync(fixture.snapshot.incrementalDiffPath, '');
+        const inventory = JSON.parse(
+          fs.readFileSync(fixture.snapshot.coverageInventoryPath, 'utf8')
+        );
+        inventory.identity = reviewIdentity(fixture.snapshot);
+        inventory.previousHeadSha = fixture.snapshot.headSha;
+        inventory.incremental = [];
+        fs.writeFileSync(fixture.snapshot.coverageInventoryPath, JSON.stringify(inventory));
+        mockPiFactory.mockClear();
+        await createOrchestrator({
+          reviewCoverage: true,
+          reviewControl: 'none',
+          reviewControlReason: '',
+        }).execute();
+        expect(mockPiFactory).toHaveBeenCalledTimes(2);
+        expect(record!.state.configurationHash).toBe(configurationHash);
+        expect(record!.state.reviewMode).toBe('full');
+        expect(record!.state.fallbackReason).toBe('Target tip or PR intent changed.');
+        expect(record!.state.completedReviews).toBe(2);
+      }
+    );
+
+    test('leaves canonical state untouched when a required coverage unit blocks', async () => {
+      const fixture = coverageFixture('blocked');
+      await createOrchestrator({ reviewCoverage: true }).execute();
+      expect(mockPiFactory).toHaveBeenCalledOnce();
+      expect(capability.publish).not.toHaveBeenCalled();
+      expect(record).toBeNull();
+      expect(fixture.work()!.state.phase).toBe('collecting');
+      expect(mockOutputSink.setOutput).toHaveBeenCalledWith('review_outcome', 'incomplete');
+      expect(mockOutputSink.setFailed).toHaveBeenCalledOnce();
+    });
+
+    test('retains consumed coverage usage when the fresh publication gate rejects a changed journal', async () => {
+      const fixture = coverageFixture();
+      let loads = 0;
+      fixture.store.load = vi.fn(async () => {
+        const work = fixture.work();
+        return ++loads > 1 && work ? { ...work, body: `${work.body} changed` } : work;
+      });
+      await expect(createOrchestrator({ reviewCoverage: true }).execute()).rejects.toThrow(
+        'journal changed'
+      );
+      expect(capability.publish).not.toHaveBeenCalled();
+      expect(record).toBeNull();
+      expect(fixture.work()!.state.phase).toBe('ready');
+      expect(mockOutputSink.setOutput).toHaveBeenCalledWith('cost', 0.5);
+      expect(mockOutputSink.setOutput).toHaveBeenCalledWith('success', false);
     });
 
     test('commits structured state without invoking generic comment publication', async () => {

@@ -1,3 +1,5 @@
+import type { ReviewWorkStore } from './work-types';
+
 export type FindingOrigin =
   'pr_introduced' | 'pre_existing' | 'pre_existing_worsened' | 'uncertain';
 export type FindingLifecycle = 'open' | 'fixed' | 'refuted' | 'risk_accepted' | 'reintroduced';
@@ -23,6 +25,12 @@ export interface ReviewSnapshot extends ReviewIdentity {
   previousPath: string | null;
   fullDiffPath: string;
   incrementalDiffPath: string | null;
+  coverageInventoryPath?: string;
+  intent?: { title: string; body: string };
+}
+
+export interface ReviewSnapshotOptions {
+  coverage?: boolean;
 }
 
 export interface FindingInput {
@@ -84,7 +92,8 @@ export interface StatefulReviewPlatform {
     authorizeNew: () => Promise<ReviewInitializationPermit | null>
   ): Promise<void>;
   canInitializeFromDraft?(): Promise<boolean>;
-  snapshot(previous: ReviewState | null): Promise<ReviewSnapshot>;
+  snapshot(previous: ReviewState | null, options?: ReviewSnapshotOptions): Promise<ReviewSnapshot>;
+  workStore?: ReviewWorkStore;
   authorizeControl(): Promise<void>;
   publish(
     expected: ReviewStateRecord | null,

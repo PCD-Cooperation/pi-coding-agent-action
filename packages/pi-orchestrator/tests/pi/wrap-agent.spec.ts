@@ -23,6 +23,7 @@ function createStubAgent(
     exportSessionHtml: Agent['exportSessionHtml'];
     exportSessionJsonl: Agent['exportSessionJsonl'];
     dispose: Agent['dispose'];
+    abort: Agent['abort'];
   }> = {}
 ): Agent {
   return {
@@ -34,6 +35,7 @@ function createStubAgent(
     exportSessionHtml: overrides.exportSessionHtml ?? vi.fn(async () => '/tmp/out.html'),
     exportSessionJsonl: overrides.exportSessionJsonl ?? vi.fn(async () => '/tmp/out.jsonl'),
     dispose: overrides.dispose ?? vi.fn(),
+    abort: overrides.abort ?? vi.fn(async () => undefined),
   } as unknown as Agent;
 }
 
@@ -90,6 +92,12 @@ describe('wrapAgent', () => {
     expect(exportSessionHtml).toHaveBeenCalledWith('/x');
     expect(exportSessionJsonl).toHaveBeenCalledWith('/y');
     expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  test('abort forwards and awaits the underlying SDK cancellation', async () => {
+    const abort = vi.fn(async () => undefined);
+    await wrapAgent(createStubAgent({ abort })).abort?.();
+    expect(abort).toHaveBeenCalledOnce();
   });
 
   test('run() always calls ready() before run()', async () => {

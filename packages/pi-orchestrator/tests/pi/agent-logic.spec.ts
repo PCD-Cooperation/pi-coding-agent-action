@@ -1263,13 +1263,15 @@ describe('Agent', () => {
   });
 
   describe('dispose', () => {
-    test('disposes the underlying SDK session', () => {
+    test('disposes the underlying SDK session', async () => {
       const agent = new Agent(mockCoreAdapter as any, mockPlatformProvider, defaultAgentConfig);
       const dispose = vi.fn();
-      (agent as unknown as { session: { dispose: () => void } }).session = { dispose };
+      const abort = vi.fn(async () => undefined);
+      Object.assign(agent, { session: { dispose, abort } });
 
-      agent.dispose();
+      await agent.dispose();
 
+      expect(abort).toHaveBeenCalledOnce();
       expect(dispose).toHaveBeenCalledTimes(1);
     });
 
