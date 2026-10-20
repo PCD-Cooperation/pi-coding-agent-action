@@ -217,6 +217,23 @@ describe('review work request cancellation', () => {
     }
   );
 
+  it('does not multiply eligibility RPCs for every progress checkpoint but refreshes them on publication loads', async () => {
+    const f = fixture();
+    const store = f.store();
+    await store.load();
+    const first = await store.save(null, state([unit()]));
+    const second = await store.save(first, state([unit()], 2));
+    expect(f.eligible).toHaveBeenCalledOnce();
+    expect(await store.load()).toEqual(second);
+    expect(f.eligible).toHaveBeenCalledTimes(2);
+    const calls = f.apiCalls();
+    f.eligible.mockRejectedValue(new Error('PR is no longer eligible'));
+    await expect(store.load()).rejects.toThrow('no longer eligible');
+    await expect(store.save(second, state([unit()], 3))).rejects.toThrow('no longer eligible');
+    expect(f.apiCalls()).toBe(calls);
+    expect(f.manifest().body).toBe(second.body);
+  });
+
   it('rejects already-aborted operations before eligibility or network calls', async () => {
     const f = fixture();
     const store = f.store();

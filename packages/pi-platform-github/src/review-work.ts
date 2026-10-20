@@ -321,19 +321,24 @@ export function createReviewWorkStore(
   assertEligible: (signal?: AbortSignal) => Promise<void>
 ): ReviewWorkStore {
   const { octokit, context } = deps;
-  const repo = context.repo;
+  const repo = { ...context.repo };
   const issue_number = context.issue.number;
   const repository = `${repo.owner}/${repo.repo}`;
   let calls = 0;
   let known = false;
   let poisoned = false;
+  let eligible = false;
   let cached: Stored | null = null;
   interface RequestOptions {
     timeout: number;
     signal?: AbortSignal;
   }
   let active: { signal: AbortSignal | undefined; writesStarted: boolean } | null = null;
-  async function operate<T>(signal: AbortSignal | undefined, action: () => Promise<T>): Promise<T> {
+  async function operate<T>(
+    signal: AbortSignal | undefined,
+    action: () => Promise<T>,
+    freshEligibility = false
+  ): Promise<T> {
     // A deadline race can finish before an aborted transport settles; never replace its context.
     if (active) {
       fail();
@@ -342,7 +347,13 @@ export function createReviewWorkStore(
     active = operation;
     try {
       signal?.throwIfAborted();
-      await assertEligible(signal);
+      // GITHUB_TOKEN quotas are shared; progress reuses admission until a fresh publication load.
+      if (freshEligibility || !eligible) {
+        eligible = false;
+        await assertEligible(signal);
+        signal?.throwIfAborted();
+        eligible = true;
+      }
       signal?.throwIfAborted();
       const result = await action();
       signal?.throwIfAborted();
@@ -801,10 +812,14 @@ export function createReviewWorkStore(
   }
   return {
     async load(signal): Promise<ReviewWorkRecord | null> {
-      return operate(signal, async () => {
-        const stored = await load();
-        return stored ? clone(stored.record) : null;
-      });
+      return operate(
+        signal,
+        async () => {
+          const stored = await load();
+          return stored ? clone(stored.record) : null;
+        },
+        true
+      );
     },
     async save(expected, input, signal): Promise<ReviewWorkRecord> {
       return operate(signal, async () => {

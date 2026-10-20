@@ -58,7 +58,9 @@ Bot work comments use `pi-stateful-review-work:v1` plus an independent persisten
 `pi-stateful-review:coverage-v1` label. `collecting`/`ready` are work phases, NOT
 successful canonical review checkpoints. A manifest is bounded to 60,000 bytes,
 inline evidence to 8 KiB, raw blob parts to 18 KiB and entry data to 64 KiB; storage
-allows 2,500 API calls per invocation. Evidence is identity/hash bound and immutable;
+caps counted storage calls at 2,500 per invocation; provider quota can be lower.
+Eligibility is checked on admission and fresh loads, not redundantly for every
+progress checkpoint. The canonical publisher still rechecks live eligibility. Evidence is identity/hash bound and immutable;
 fresh publication verification reads all referenced evidence. Missing witnessed
 history, corruption, ambiguity, conflicts or failed verification refuse publication.
 
