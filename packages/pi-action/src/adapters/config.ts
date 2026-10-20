@@ -70,6 +70,15 @@ export function parsePositiveIntInput(raw: string): number | undefined {
   return parsed > 0 ? parsed : undefined;
 }
 
+function parseBoundedReviewIntInput(name: string, defaultValue: number, maximum: number): number {
+  const raw = core.getInput(name).trim() || String(defaultValue);
+  const parsed = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) {
+    throw new Error(`${name} must be a safe integer from 1 to ${maximum}.`);
+  }
+  return parsed;
+}
+
 /**
  * Split a string into a trimmed, deduped list of non-empty items using
  * `separator`. Returns `undefined` when the input is empty or contains
@@ -424,6 +433,12 @@ export function gatherActionsConfig(): PiConfig {
   }
 
   const statefulReview = parseBooleanInput(core.getInput('stateful_review'), false);
+  const reviewCoverage = parseBooleanInput(core.getInput('review_coverage'), false);
+  const reviewWorkConcurrency = parseBoundedReviewIntInput('review_work_concurrency', 3, 3);
+  const reviewWorkMaxUnits = parseBoundedReviewIntInput('review_work_max_units', 96, 96);
+  if (reviewCoverage && !statefulReview) {
+    throw new Error('Coverage review requires stateful_review=true.');
+  }
   const reviewControlRaw = core.getInput('review_control').trim() || 'none';
   if (!['none', 'bootstrap', 'resume', 'full'].includes(reviewControlRaw)) {
     throw new Error('review_control must be none, bootstrap, resume, or full.');
@@ -450,6 +465,15 @@ export function gatherActionsConfig(): PiConfig {
   return {
     ...(statefulReview
       ? { statefulReview, reviewMaxRounds, reviewControl, reviewControlReason }
+      : {}),
+    ...(reviewCoverage
+      ? {
+          reviewCoverage: true,
+          reviewCoverageOptions: {
+            concurrency: reviewWorkConcurrency,
+            maxUnits: reviewWorkMaxUnits,
+          },
+        }
       : {}),
     provider,
     model,

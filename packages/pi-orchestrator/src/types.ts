@@ -11,6 +11,12 @@ import type { CreateReactionType, PlatformProvider } from './platform';
 import type { OpengistExpiration } from './share/opengist';
 import type { ReviewControl, ReviewSnapshot, ReviewSubmission } from './review/types';
 import type { ReviewDependencies } from './review/dependencies';
+import type {
+  ReviewCoverageOptions,
+  ReviewWorkUnit,
+  ReviewUnitResult,
+  ReviewWorkFollowUp,
+} from './review/work-types';
 
 /**
  * Platform-neutral logging interface.
@@ -118,6 +124,7 @@ export interface PiAgent {
   exportSessionJsonl(outputPath: string): Promise<string>;
   /** Release the underlying session and any provider resources it owns. */
   dispose(): void | Promise<void>;
+  abort?(): Promise<void>;
 }
 
 /**
@@ -137,6 +144,8 @@ export interface SessionStats {
  */
 export interface PromptResult {
   review?: ReviewSubmission;
+  reviewUnit?: ReviewUnitResult;
+  reviewFollowUps?: ReviewWorkFollowUp[];
   /** The text response from the agent */
   result: string;
   /** Session statistics including token usage, if available */
@@ -251,6 +260,13 @@ export interface ResourceLoaderConfig extends DiffConfig {
  */
 export interface PiConfig extends DiffConfig {
   statefulReview?: boolean;
+  reviewCoverage?: boolean;
+  reviewCoverageOptions?: Partial<ReviewCoverageOptions>;
+  reviewWorkUnit?: ReviewWorkUnit;
+  reviewUnitValidator?: (result: ReviewUnitResult) => void;
+  reviewCoverageSynthesis?: boolean;
+  reviewFollowupValidator?: (requests: ReviewWorkFollowUp[]) => void;
+  reviewToolBudget?: number;
   /** Host-staged read locations only; never populated from model task arguments. */
   reviewReadContext?: Readonly<{
     snapshot: Readonly<ReviewSnapshot>;

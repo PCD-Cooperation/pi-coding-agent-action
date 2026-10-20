@@ -3,6 +3,7 @@ import { parseReviewComment } from '@alexanderfortin/pi-orchestrator';
 import type {
   ReviewIdentity,
   ReviewSnapshot,
+  ReviewSnapshotOptions,
   ReviewState,
   ReviewStateRecord,
   StatefulReviewPlatform,
@@ -10,6 +11,7 @@ import type {
 import type { GitHubModuleDeps } from './types';
 import { prepareReviewSnapshot } from './review-snapshot';
 import { createReviewLifecycle } from './review-lifecycle';
+import { createReviewWorkStore } from './review-work';
 
 const MARKER = '<!-- pi-stateful-review:v1 -->';
 const BOT = 'github-actions[bot]';
@@ -36,7 +38,8 @@ type Prepare = (
   identity: Omit<ReviewIdentity, 'mergeBaseSha'>,
   previous: ReviewState | null,
   remote: string,
-  token?: string
+  token?: string,
+  options?: ReviewSnapshotOptions
 ) => Promise<ReviewSnapshot>;
 
 /** GitHub has no comment CAS. Callers MUST serialize cooperating writers per PR.
@@ -56,18 +59,27 @@ export function createStatefulReviewPlatform(
       throw new Error('Review state repository/PR mismatch');
     }
   }
-  async function requireInstallationToken(): Promise<void> {
+  async function requireInstallationToken(signal?: AbortSignal): Promise<void> {
     try {
       // Octokit's tokenType is inferred from legacy token syntax, not server identity.
-      await octokit.rest.apps.listReposAccessibleToInstallation({ per_page: 1 });
+      await octokit.rest.apps.listReposAccessibleToInstallation({
+        per_page: 1,
+        ...(signal ? { request: { signal, timeout: 15_000 } } : {}),
+      });
     } catch {
       throw new Error(
         'Unable to verify installation authentication; stateful review requires GITHUB_TOKEN.'
       );
     }
   }
-  async function live() {
-    const { data: pr } = await octokit.rest.pulls.get({ ...repo, pull_number: pullNumber });
+  async function live(includeIntent = false, signal?: AbortSignal) {
+    signal?.throwIfAborted();
+    const request = signal ? { request: { signal, timeout: 15_000 } } : {};
+    const { data: pr } = await octokit.rest.pulls.get({
+      ...repo,
+      pull_number: pullNumber,
+      ...request,
+    });
     if (pr.state !== 'open' || pr.draft || pr.merged) {
       throw new Error('Stateful review requires an open, non-draft PR');
     }
@@ -91,7 +103,11 @@ export function createStatefulReviewPlatform(
       throw new Error('Invalid live base ref');
     }
     // PR base.sha may lag behind the named branch's current tip.
-    const { data: ref } = await octokit.rest.git.getRef({ ...repo, ref: `heads/${baseRef}` });
+    const { data: ref } = await octokit.rest.git.getRef({
+      ...repo,
+      ref: `heads/${baseRef}`,
+      ...request,
+    });
     if (
       ref.object?.type !== 'commit' ||
       typeof ref.object.sha !== 'string' ||
@@ -107,6 +123,7 @@ export function createStatefulReviewPlatform(
       headSha: pr.head.sha,
       baseSha: ref.object.sha,
       baseRef,
+      ...(includeIntent ? { intent: { title: pr.title, body: pr.body ?? '' } } : {}),
       intentHash: createHash('sha256')
         .update(JSON.stringify([pr.title, pr.body ?? '']))
         .digest('hex'),
@@ -149,6 +166,10 @@ export function createStatefulReviewPlatform(
   const lifecycle = createReviewLifecycle(deps, loadState);
   return {
     loadState,
+    workStore: createReviewWorkStore(deps, async signal => {
+      await requireInstallationToken(signal);
+      await live(false, signal);
+    }),
     async ensureInitialized(previous, authorizeNew) {
       await requireInstallationToken();
       await live();
@@ -223,12 +244,12 @@ export function createStatefulReviewPlatform(
       }
       return false;
     },
-    async snapshot(previous) {
+    async snapshot(previous, options) {
       await requireInstallationToken();
       if (previous) {
         associated(previous);
       }
-      const { cloneUrl, ...identity } = await live();
+      const { cloneUrl, ...identity } = await live(Boolean(options?.coverage));
       // server_url is a permalink override, never an authenticated transport destination.
       const remote = new URL(cloneUrl);
       if (
@@ -242,7 +263,9 @@ export function createStatefulReviewPlatform(
         throw new Error('Unsafe repository clone URL');
       }
       const auth = (await octokit.auth()) as { token?: string };
-      return prepare(identity, previous, remote.href, auth.token);
+      return options?.coverage
+        ? prepare(identity, previous, remote.href, auth.token, options)
+        : prepare(identity, previous, remote.href, auth.token);
     },
     async authorizeControl() {
       if (!context.actor) {

@@ -10,6 +10,7 @@ export type {
   ReviewControl,
   ReviewIdentity,
   ReviewSnapshot,
+  ReviewSnapshotOptions,
   FindingInput,
   ReviewSubmission,
   ReviewFinding,
@@ -18,6 +19,22 @@ export type {
   ReviewInitializationPermit,
   StatefulReviewPlatform,
 } from './review/types';
+export type {
+  ReviewChangedHunk,
+  ReviewChangedFile,
+  ReviewCoverageInventory,
+  ReviewWorkSpan,
+  ReviewWorkUnit,
+  ReviewWorkFollowUp,
+  ReviewUnitResult,
+  ReviewSynthesisResult,
+  ReviewWorkData,
+  ReviewWorkEntry,
+  ReviewWorkState,
+  ReviewWorkRecord,
+  ReviewWorkStore,
+  ReviewCoverageOptions,
+} from './review/work-types';
 export {
   REVIEW_STATE_MARKER,
   parseReviewComment,

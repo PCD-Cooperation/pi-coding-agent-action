@@ -28,7 +28,7 @@ import { getSystemPrompt } from './prompt';
 import { createLoggingFactory } from './logging';
 import type { ExtensionLoadingInfo } from './logging';
 import { createToolsFactory } from './tools/index';
-import type { Logger, ResourceLoaderConfig } from '../types';
+import type { Logger, PiConfig, ResourceLoaderConfig } from '../types';
 import type { PlatformProvider } from '../platform';
 
 /**
@@ -151,12 +151,21 @@ export function buildMcpLoadConfig(config?: ResourceLoaderConfig): LoadedMcpConf
  * @param config - Resource loader config carrying the tool/MCP toggles.
  * @returns The extension factories to append, in load order.
  */
-export function buildBuiltinAgentExtensions(config?: ResourceLoaderConfig): ExtensionFactory[] {
+export function buildBuiltinAgentExtensions(
+  config?: ResourceLoaderConfig &
+    Pick<PiConfig, 'statefulReview' | 'reviewWorkUnit' | 'reviewCoverageSynthesis'>
+): ExtensionFactory[] {
   const hasMcpServers = config?.mcpServers ? Object.keys(config.mcpServers).length > 0 : false;
   const factories: ExtensionFactory[] = [];
 
   if (config?.enableCodemode || hasMcpServers) {
-    factories.push(createCodemodeExtension({ mode: 'on' }));
+    factories.push(
+      createCodemodeExtension({
+        mode: 'on',
+        models:
+          !config?.statefulReview && !config?.reviewWorkUnit && !config?.reviewCoverageSynthesis,
+      })
+    );
   }
   // Loaded alongside codemode whenever MCP servers are configured because the
   // SDK activates whichever tool a server's `exposure` needs (`codemode` for

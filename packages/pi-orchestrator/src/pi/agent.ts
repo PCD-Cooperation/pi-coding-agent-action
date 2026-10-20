@@ -27,6 +27,12 @@ import type { ReviewCoordinator } from './review-subagents/coordinator';
 import { getPiVersion } from '../version';
 import { createReviewSubmissionCapture, STATEFUL_REVIEW_TOOLS } from '../review/submission';
 import type { ReviewSubmissionCapture } from '../review/submission';
+import {
+  createReviewUnitCapture,
+  createReviewSynthesisCapture,
+  REVIEW_WORK_READ_TOOLS,
+} from '../review/work-submission';
+import type { ReviewUnitCapture, ReviewSynthesisCapture } from '../review/work-submission';
 
 import type { AgentSession, AgentSessionEvent } from '@earendil-works/pi-coding-agent';
 import type { Api, AssistantMessageEvent, Model } from '@earendil-works/pi-ai';
@@ -77,9 +83,19 @@ const MODEL_REFRESH_TIMEOUT_MS = 15_000;
 export class Agent {
   private reviewCoordinator?: ReviewCoordinator;
   private reviewSubmissionCapture?: ReviewSubmissionCapture;
+  private reviewUnitCapture?: ReviewUnitCapture;
+  private reviewSynthesisCapture?: ReviewSynthesisCapture;
   private model!: Model<Api>;
   private modelRuntime!: ModelRuntime;
   private session!: AgentSession;
+  private startup: Promise<Agent> | undefined;
+  private startupController?: AbortController;
+  private sessionInitialized = false;
+  private cancelledBeforePrompt = false;
+  private prompting = false;
+  private disposed = false;
+  private disposal?: Promise<void>;
+  private sessionDisposals = new WeakMap<AgentSession, Promise<void>>();
   private thinkingLevel: ThinkingLevel;
   private outputChunks: string[] = [];
   private logger: Logger;
@@ -144,31 +160,83 @@ export class Agent {
    * @throws {Error} If the requested model cannot be found in the registry
    *                  (after extensions have been loaded).
    */
-  // fallow-ignore-next-line complexity
   async ready(): Promise<Agent> {
-    const loaderConfig: ResourceLoaderConfig = this.config;
+    this.assertNotDisposed();
+    if (this.startup) {
+      return this.startup;
+    }
+    this.cancelledBeforePrompt = false;
+    if (this.sessionInitialized) {
+      this.startupController = new AbortController();
+      return this;
+    }
+    const controller = new AbortController();
+    this.startupController = controller;
+    const startup = this.initialize(controller.signal).catch(async error => {
+      await this.disposeSession(this.session);
+      throw error;
+    });
+    this.startup = startup;
+    try {
+      return await startup;
+    } finally {
+      this.startup = undefined;
+    }
+  }
+
+  // fallow-ignore-next-line complexity
+  private async initialize(signal: AbortSignal): Promise<Agent> {
+    const reviewWork =
+      Boolean(this.config.reviewWorkUnit) || Boolean(this.config.reviewCoverageSynthesis);
+    const readOnlyReview = Boolean(this.config.statefulReview) || reviewWork;
+    const loaderConfig: ResourceLoaderConfig = reviewWork
+      ? {
+          ...this.config,
+          statefulReview: true,
+          extensions: [],
+          mcpServers: {},
+          enableToolSearch: false,
+        }
+      : this.config;
     const resourceLoaderOptions = await buildResourceLoaderOptions(
       this.logger,
       this.platformProvider,
       loaderConfig
     );
+    signal.throwIfAborted();
 
     const cwd = this.config.cwd ?? process.cwd();
 
-    const settingsManager = SettingsManager.create(cwd);
+    if (reviewWork) {
+      Object.assign(resourceLoaderOptions, {
+        noExtensions: true,
+        noSkills: true,
+        noPromptTemplates: true,
+        noContextFiles: true,
+        agentsFilesOverride: () => ({ agentsFiles: [] }),
+        appendSystemPromptOverride: () => [],
+      });
+    }
+    const settingsManager = reviewWork ? SettingsManager.inMemory() : SettingsManager.create(cwd);
 
     // Create and configure the model runtime (replaces the legacy
     // AuthStorage + ModelRegistry pair). ModelRuntime.create() is async
     // (it refreshes the model catalog), so initialisation happens here in
     // ready() rather than in the constructor.
     const credentials = await createCopilotCredentials(this.config, this.events.onAuthToken);
-    this.modelRuntime = await ModelRuntime.create(credentials ? { credentials } : undefined);
+    signal.throwIfAborted();
+    this.modelRuntime = await ModelRuntime.create({
+      ...(credentials ? { credentials } : {}),
+      signal,
+    });
+    signal.throwIfAborted();
 
-    if (this.config.enableReviewSubagents) {
+    if (this.config.enableReviewSubagents && !reviewWork) {
       if (this.config.provider !== 'github-copilot' || !this.config.copilotOAuthToken) {
         throw new Error('Review subagents require native Copilot OAuth.');
       }
       const { paths } = await resolveExtensions([REVIEW_SUBAGENTS_PACKAGE], cwd);
+      signal.throwIfAborted();
       if (paths.length !== 1) {
         throw new Error('Could not resolve pinned review subagent extension.');
       }
@@ -196,7 +264,22 @@ export class Agent {
       );
     }
 
-    if (this.config.statefulReview) {
+    if (this.config.reviewWorkUnit) {
+      this.reviewUnitCapture = createReviewUnitCapture(
+        this.config.reviewWorkUnit,
+        this.config.reviewUnitValidator,
+        this.config.reviewToolBudget
+      );
+      resourceLoaderOptions.extensionFactories.push(this.reviewUnitCapture.factory);
+    } else if (this.config.reviewCoverageSynthesis) {
+      this.reviewSynthesisCapture = createReviewSynthesisCapture(
+        this.config.reviewSubmissionValidator,
+        this.config.reviewFollowupValidator,
+        this.config.reviewToolBudget
+      );
+      this.reviewSubmissionCapture = this.reviewSynthesisCapture;
+      resourceLoaderOptions.extensionFactories.push(this.reviewSynthesisCapture.factory);
+    } else if (this.config.statefulReview) {
       this.reviewSubmissionCapture = createReviewSubmissionCapture(
         () => Boolean(this.reviewCoordinator?.uncollected),
         this.config.reviewSubmissionValidator
@@ -206,7 +289,8 @@ export class Agent {
 
     if (this.config.token) {
       this.logger.debug(`[auth] Setting api_key token for ${this.config.provider} provider`);
-      await this.applyRuntimeApiKey(this.config.token);
+      await this.applyRuntimeApiKey(this.config.token, signal);
+      signal.throwIfAborted();
     }
 
     if (this.config.baseUrl) {
@@ -224,8 +308,9 @@ export class Agent {
     } else {
       const { errors } = await this.modelRuntime.refresh({
         providers: [this.config.provider],
-        signal: AbortSignal.timeout(MODEL_REFRESH_TIMEOUT_MS),
+        signal: AbortSignal.any([signal, AbortSignal.timeout(MODEL_REFRESH_TIMEOUT_MS)]),
       });
+      signal.throwIfAborted();
       const refreshError = errors.get(this.config.provider);
       if (refreshError) {
         this.logger.warning(
@@ -240,7 +325,9 @@ export class Agent {
       modelRuntime: this.modelRuntime,
       settingsManager,
       resourceLoaderOptions,
+      modelRuntimeSignal: signal,
     });
+    signal.throwIfAborted();
 
     // Log any non-fatal diagnostics from service creation.
     for (const diagnostic of services.diagnostics) {
@@ -299,12 +386,29 @@ export class Agent {
     // Stateful reviews always have an authoritative read-only allowlist, even
     // when the caller otherwise permits all tools. Optional tools are included
     // only when actually registered, preserving unknown-name checks for callers.
-    const registeredTools = this.config.statefulReview
+    const registeredTools = readOnlyReview
       ? services.resourceLoader
           .getExtensions()
           .extensions.flatMap(extension => [...extension.tools.keys()])
       : [];
-    const loadedTools = this.config.statefulReview
+    const endpoints = this.config.reviewWorkUnit
+      ? ['submit_review_unit_result']
+      : this.config.reviewCoverageSynthesis
+        ? ['submit_review_result', 'request_review_followup']
+        : ['submit_review_result'];
+    const allowedTools = reviewWork
+      ? new Set([...REVIEW_WORK_READ_TOOLS, ...endpoints])
+      : new Set([...STATEFUL_REVIEW_TOOLS].filter(name => name !== 'request_review_followup'));
+    const optionalTools = new Set([
+      'subagent',
+      'wait_subagents',
+      'submit_review_result',
+      'submit_review_unit_result',
+      'request_review_followup',
+      'codemode',
+      'get_issue_or_pr_thread',
+    ]);
+    const loadedTools = readOnlyReview
       ? [
           ...new Set([
             ...(
@@ -316,8 +420,12 @@ export class Agent {
                 ...registeredTools,
                 ...(this.config.enableCodemode ? ['codemode'] : []),
               ]
-            ).filter(name => STATEFUL_REVIEW_TOOLS.has(name)),
-            'submit_review_result',
+            ).filter(
+              name =>
+                allowedTools.has(name) &&
+                (!optionalTools.has(name) || registeredTools.includes(name))
+            ),
+            ...endpoints,
           ]),
         ]
       : this.config.loadedTools;
@@ -329,7 +437,8 @@ export class Agent {
     // is silently skipped.
     /* eslint-disable @typescript-eslint/prefer-nullish-coalescing -- intentional ||: flags are boolean|undefined and must fall through false; ?? only falls through null/undefined */
     const needsPersistence =
-      this.config.exportSessionHtml || this.config.exportSessionJsonl || this.config.shareSession;
+      !reviewWork &&
+      (this.config.exportSessionHtml || this.config.exportSessionJsonl || this.config.shareSession);
     /* eslint-enable @typescript-eslint/prefer-nullish-coalescing */
     const sessionManager = needsPersistence
       ? SessionManager.create(services.cwd)
@@ -345,6 +454,7 @@ export class Agent {
       ...(loadedTools ? { tools: loadedTools } : {}),
     });
     this.session = session;
+    signal.throwIfAborted();
 
     // Enable auto-compaction if requested. This allows Pi to automatically
     // summarize older messages when the context window fills up, enabling
@@ -427,6 +537,7 @@ export class Agent {
       mode: 'print',
       onError: error => this.logger.error(`[extension] ${error.extensionPath}: ${error.error}`),
     });
+    signal.throwIfAborted();
 
     // Activate the built-in orchestration tools when explicitly enabled. The
     // SDK registers `codemode` and `tool_search` inactive; MCP servers may also
@@ -435,7 +546,7 @@ export class Agent {
     // it), so an explicit allowlist stays authoritative.
     const orchestrationTools = [
       ...(this.config.enableCodemode ? ['codemode'] : []),
-      ...(this.config.enableToolSearch ? ['tool_search'] : []),
+      ...(this.config.enableToolSearch && !reviewWork ? ['tool_search'] : []),
     ];
     if (orchestrationTools.length > 0) {
       this.session.setActiveToolsByName([
@@ -445,7 +556,34 @@ export class Agent {
       this.logger.info(`[tools] Activated: ${orchestrationTools.join(', ')}`);
     }
 
+    this.sessionInitialized = true;
     return this;
+  }
+
+  private assertNotDisposed(): void {
+    if (this.disposed) {
+      throw new Error('Agent has been disposed.');
+    }
+  }
+
+  private disposeSession(session: AgentSession | undefined): Promise<void> {
+    if (!session) {
+      return Promise.resolve();
+    }
+    const previous = this.sessionDisposals.get(session);
+    if (previous) {
+      return previous;
+    }
+    const disposal = (async () => {
+      try {
+        await session.extensionRunner?.emit({ type: 'session_shutdown', reason: 'quit' });
+      } finally {
+        session.dispose();
+        this.sessionInitialized = false;
+      }
+    })();
+    this.sessionDisposals.set(session, disposal);
+    return disposal;
   }
 
   /**
@@ -469,10 +607,12 @@ export class Agent {
    * @param token - The API key to set. Caller guarantees it is non-empty.
    * @private
    */
-  private async applyRuntimeApiKey(token: string): Promise<void> {
+  private async applyRuntimeApiKey(token: string, signal: AbortSignal): Promise<void> {
     try {
-      await this.modelRuntime.setRuntimeApiKey(this.config.provider, token);
+      await this.modelRuntime.setRuntimeApiKey(this.config.provider, token, { signal });
+      signal.throwIfAborted();
     } catch (error) {
+      signal.throwIfAborted();
       if (!(error instanceof CredentialSynchronizationError)) {
         throw error;
       }
@@ -486,14 +626,15 @@ export class Agent {
       // environments where AbortSignal.timeout is unavailable.
       const refreshSignal =
         typeof AbortSignal.timeout === 'function'
-          ? AbortSignal.timeout(MODEL_REFRESH_TIMEOUT_MS)
-          : undefined;
+          ? AbortSignal.any([signal, AbortSignal.timeout(MODEL_REFRESH_TIMEOUT_MS)])
+          : signal;
       const { aborted, errors } = await this.modelRuntime.refresh({
         providers: [providerId],
         allowNetwork: true,
         force: true,
         ...(refreshSignal ? { signal: refreshSignal } : undefined),
       });
+      signal.throwIfAborted();
       const refreshError = errors.get(providerId);
       if (aborted || refreshError) {
         throw new Error(
@@ -520,12 +661,24 @@ export class Agent {
       throw new Error('no text, skipping prompt');
     }
 
+    this.assertNotDisposed();
+    this.startupController?.signal.throwIfAborted();
+    if (this.cancelledBeforePrompt) {
+      throw new Error('Agent run was aborted before prompting.');
+    }
+
     // Reset error state for this run. The agent_end event handler will
     // populate this field during the session.
     this.lastAgentError = undefined;
 
     this.reviewSubmissionCapture?.reset();
-    await this.session.prompt(text);
+    this.reviewUnitCapture?.reset();
+    this.prompting = true;
+    try {
+      await this.session.prompt(text);
+    } finally {
+      this.prompting = false;
+    }
     if (this.reviewCoordinator?.uncollected) {
       throw new Error('Incomplete review: child findings were not collected.');
     }
@@ -537,7 +690,11 @@ export class Agent {
     const sessionStats = this.collectSessionStats();
     const error = this.lastAgentError;
 
-    if (this.config.statefulReview) {
+    if (
+      this.config.statefulReview ||
+      this.config.reviewWorkUnit ||
+      this.config.reviewCoverageSynthesis
+    ) {
       // A provider failure or aborted final turn must never expose a candidate
       // submission to the host's commit path, even if the tool ran earlier.
       const finalAssistant = [...this.session.messages]
@@ -549,6 +706,19 @@ export class Agent {
           ['error', 'aborted'].includes(finalAssistant.stopReason))
       ) {
         throw new Error(error ?? 'Stateful review session failed or was aborted.');
+      }
+      if (this.config.reviewWorkUnit) {
+        const reviewUnit = this.reviewUnitCapture?.getResult();
+        if (!reviewUnit) {
+          throw new Error(
+            'Incomplete review: submit_review_unit_result was not called successfully.'
+          );
+        }
+        return { result, sessionStats, error, reviewUnit };
+      }
+      const reviewFollowUps = this.reviewSynthesisCapture?.getFollowUps();
+      if (reviewFollowUps) {
+        return { result, sessionStats, error, reviewFollowUps };
       }
       const review = this.reviewSubmissionCapture?.getSubmission();
       if (!review) {
@@ -603,6 +773,16 @@ export class Agent {
     return this.session.exportToJsonl(outputPath);
   }
 
+  async abort(): Promise<void> {
+    if (!this.prompting) {
+      this.cancelledBeforePrompt = true;
+    }
+    if (this.startup) {
+      this.startupController?.abort(new Error('Agent startup was aborted.'));
+    }
+    await this.session?.abort();
+  }
+
   /**
    * Release the underlying SDK session and its provider resources.
    *
@@ -611,13 +791,24 @@ export class Agent {
    * its expiry timer so headless callers can exit immediately.
    */
   async dispose(): Promise<void> {
-    try {
-      if (this.config.enableReviewSubagents) {
-        await this.session?.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
-      }
-    } finally {
-      this.session?.dispose();
+    if (this.disposal) {
+      return this.disposal;
     }
+    this.disposed = true;
+    this.startupController?.abort(new Error('Agent was disposed during startup.'));
+    const startup = this.startup;
+    this.disposal = (async () => {
+      try {
+        await this.session?.abort();
+      } finally {
+        try {
+          await startup?.catch(() => undefined);
+        } finally {
+          await this.disposeSession(this.session);
+        }
+      }
+    })();
+    return this.disposal;
   }
 
   /**
@@ -852,6 +1043,9 @@ export function wrapAgent(agent: Agent): PiAgent {
     },
     async exportSessionJsonl(outputPath: string) {
       return agent.exportSessionJsonl(outputPath);
+    },
+    async abort() {
+      await agent.abort();
     },
     dispose() {
       return agent.dispose();

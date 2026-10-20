@@ -3,7 +3,13 @@ import { promisify } from 'node:util';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
-import type { ReviewIdentity, ReviewSnapshot, ReviewState } from '@alexanderfortin/pi-orchestrator';
+import type {
+  ReviewIdentity,
+  ReviewSnapshot,
+  ReviewSnapshotOptions,
+  ReviewState,
+} from '@alexanderfortin/pi-orchestrator';
+import { prepareReviewCoverageInventory } from './review-inventory';
 
 const exec = promisify(execFile);
 const MAX_BYTES = 128 * 1024 * 1024;
@@ -16,7 +22,8 @@ export async function prepareReviewSnapshot(
   identity: Omit<ReviewIdentity, 'mergeBaseSha'>,
   previous: ReviewState | null,
   remote: string,
-  token?: string
+  token?: string,
+  options?: ReviewSnapshotOptions
 ): Promise<ReviewSnapshot> {
   const root = await mkdtemp(join(tmpdir(), 'pi-review-'));
   const gitDir = join(root, 'objects.git');
@@ -197,9 +204,26 @@ export async function prepareReviewSnapshot(
         );
       }
     }
+    const coverageInventoryPath = options?.coverage
+      ? await prepareReviewCoverageInventory(
+          root,
+          {
+            repository: identity.repository,
+            pullNumber: identity.pullNumber,
+            headSha: identity.headSha,
+            baseSha: identity.baseSha,
+            mergeBaseSha,
+            baseRef: identity.baseRef,
+            intentHash: identity.intentHash,
+          },
+          previousPath ? previous!.snapshot.headSha : null,
+          rawGit
+        )
+      : undefined;
     return {
       ...identity,
       mergeBaseSha,
+      ...(coverageInventoryPath ? { coverageInventoryPath } : {}),
       mode: incrementalDiffPath ? 'incremental' : 'full',
       fallbackReason,
       headPath,

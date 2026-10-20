@@ -30,13 +30,16 @@ directory contributes to both the prompt and configuration fingerprint.
 
 Inputs:
 
-| Input                   | Default  | Behavior                                                       |
-| ----------------------- | -------- | -------------------------------------------------------------- |
-| `stateful_review`       | `false`  | Enable the protocol; requires `publish_comment: true`          |
-| `review_max_rounds`     | `3`      | Actionable fix revisions per episode before human reassessment |
-| `review_control`        | `none`   | `none`, `bootstrap`, `resume`, or `full`                       |
-| `review_control_reason` | empty    | Required for every non-`none` control                          |
-| `pr_number`             | event PR | Set explicitly for manual dispatch                             |
+| Input                     | Default  | Behavior                                                                   |
+| ------------------------- | -------- | -------------------------------------------------------------------------- |
+| `stateful_review`         | `false`  | Enable the protocol; requires `publish_comment: true`                      |
+| `review_coverage`         | `false`  | Host inventory, durable work and completion gate; requires stateful review |
+| `review_work_concurrency` | `3`      | Concurrent coverage workers, 1–3                                           |
+| `review_work_max_units`   | `96`     | Total required coverage units, 1–96                                        |
+| `review_max_rounds`       | `3`      | Actionable fix revisions per episode before human reassessment             |
+| `review_control`          | `none`   | `none`, `bootstrap`, `resume`, or `full`                                   |
+| `review_control_reason`   | empty    | Required for every non-`none` control                                      |
+| `pr_number`               | event PR | Set explicitly for manual dispatch                                         |
 
 Controls authorize the triggering actor through repository collaborator permission
 (`write`, `maintain`, or `admin`), not through PR text, a comment, or PR authorship.
@@ -145,14 +148,101 @@ not truncate these pinned files. Readers must paginate their own bounded output.
 Temporary snapshots remain until runner cleanup; use ephemeral runners or clean
 job-owned temp directories on persistent runners.
 
+## Host-managed coverage work (additional opt-in)
+
+Set `review_coverage: true` to replace free-form delegation with host-managed
+required work. One action invocation performs inventory, parallel worker waves,
+additional discovered checks and final synthesis. There is **no self-dispatch,
+continuation workflow, or `actions: write` requirement**. Session export/sharing
+is unsupported in this mode. Worker model/thinking use the existing
+`review_subagent_model`/`review_subagent_thinking_level` inputs; legacy child
+spawning/collection is disabled inside workers and synthesis.
+
+The host stages authoritative Git NUL-delimited file metadata plus per-file
+patches for both M→H and, when available, P→H. Deterministic IDs account for all
+changed hunks, renames, deletions, empty files, binary resources and mode changes.
+Primary work is split by bytes/lines/files/spans, including UTF-8-safe byte slices
+of long lines. Split files receive additional whole-file integration units; prior
+open findings receive reconciliation units. Whole-file integration waits for its
+primary ranges, and related peer evidence is supplied to integration/retries.
+Partial producers wait for requested checks rather than repeating before those
+results exist. Coverage mode forces full scope when target tip or PR intent changes,
+even if P→H is empty. Binary work is an explicit semantic
+resource/consumer check, not a claim that inspecting a hash certifies its content.
+Missing material integration/consumer/generator scope becomes another required
+unit, rather than an ignored limitation or a sampled clean result.
+
+Workers submit bounded structured results. A reviewed claim must include every
+assigned span/finding ID and evidence-backed finding dispositions, with no
+limitations. These claims and read receipts are not formal semantic proof.
+The final synthesizer reads every unit assessment/candidate, independently verifies
+material findings, integrates cross-scope behavior, deduplicates causes and
+reconciles all prior IDs. It need not repeat all primary inspections. It submits
+one whole-review result or requests additional required host work within the same
+invocation. Missing evidence, no progress or exhausted resources remain non-passing.
+
+Default/hard maxima:
+
+- 96 required units, including integration, reconciliation and follow-up work;
+  3 concurrent workers and 2 attempts per unit per invocation.
+- Primary units: 96 KiB patch bytes, 1,800 lines, 8 files and 24 spans;
+  worker results: 6 KiB JSON. No source/result truncation is used to pass a gate.
+- Each model session: 5 minutes and 60 read-tool calls, including nested codemode
+  reads. Codemode model-generation globals are disabled for coverage sessions and ordinary
+  stateful parent sessions.
+- Coverage work admission: a 22-minute window measured from invocation start, with a 4-minute synthesis
+  reserve and at most 3 synthesis attempts. Host storage operations are bounded
+  to 60 seconds, with cancellable 15-second GitHub requests. Keep the caller's
+  job timeout above this allowance; it remains the final CI boundary.
+- Work storage: 60,000-byte manifest, 8 KiB inline evidence, 18 KiB raw immutable
+  blob parts, 64 KiB per entry, 16 KiB retained follow-up history and 2,500 counted storage API calls. Authentication
+  and PR freshness checks are additional bounded requests. This is a work/time
+  allowance, not a guaranteed dollar-cost ceiling.
+
+A separate Bot manifest (`<!-- pi-stateful-review-work:v1 -->`) and persistent
+`pi-stateful-review:coverage-v1` label witness coverage history. `collecting` and
+`ready` are work phases, **not** canonical checkpoints, approvals or deployments.
+Evidence references bind repository/PR/fingerprint/entry identity and hashes;
+missing witnessed manifests, duplicate/corrupt data, missing blobs, conflicts and
+ambiguous writes fail closed. Preserve manifests, blobs and labels during rollback.
+
+A failed invocation can recover reviewed units or a ready synthesis only for the
+exact H/B/M/P, intent, configuration, deterministic plan and canonical-predecessor
+fingerprint. Changed inputs invalidate work reuse, never canonical findings,
+fix-round budgets or pause state. Within that fingerprint, cumulative attempt
+counts never reset; each retry has a bounded new invocation allowance. Identically
+blocked scopes are not automatically repeated: change the material input/policy or
+use authorized full reassessment. Durable recovery is failure handling, not a
+normal multi-run review-completion protocol. Partial unit and synthesis candidates
+are retained and supplied on recovery, including through subsequent follow-up requests.
+Final synthesis must explain evidence-backed refutation of omitted prior proposals;
+they are not accepted canonical findings. Output capacity is validated before capture,
+so an oversized result cannot become an unpublishable cached `ready` journal.
+
+Before canonical publication the host freshly reloads and verifies all referenced
+evidence, requires every required unit reviewed plus successful synthesis, and
+binds the exact review hash. Existing publisher freshness/lifecycle checks then
+apply. Only that publication can assign new F-IDs or advance success counters.
+Incomplete reports enumerate every unfinished unit ID/status/attempt count and
+point to the exact required-scope mappings in workflow logs; unit candidates remain
+in the durable journal, separate from the unchanged canonical ledger.
+
+An offline admission check on the frozen #1873-sized diff accounted for 229 files,
+394 hunks and 3,791,815 patch bytes as 90 units (74 primary, 16 integration), within
+the configured budget. This proves deterministic admission, not live model quality,
+latency or successful semantic completion. Validate those in a coordinated pilot
+before rollout; do not merge/deploy merely because a fixture fits.
+
+The immutable consumer interface is [coverage contract v1](contracts/review-coverage-v1.md).
+
 ## Approved dependency evidence
 
 For changed workflow files, the host may stage the exact commit-pinned public
 source of this action: only `PCD-Cooperation/pi-coding-agent-action` and upstream
 `shaftoe/pi-coding-agent-action`. The fixed required files are `action.yml`, the
 orchestrator, the action's Git adapter and GitHub comment publisher. The fixed
-versioned stateful runner, renderer, GitHub state provider and lifecycle implementation are also staged when
-present; only a nonredirected 404 denotes an older version without those files.
+versioned stateful runner, renderer, GitHub state provider, lifecycle implementation
+and coverage contract v1 are also staged when present; only a nonredirected 404 denotes an older version without those files.
 Their absence is disclosed, not evidence that an unknown contract is safe.
 This source-controlled allowlist is maintainer policy, not a PR or model input.
 PR-head, merge-base and actual-target references are considered for changed workflows. Mutable tags, arbitrary
@@ -167,7 +257,7 @@ package is declared as a core runtime dependency for this parsing boundary.
 The fetcher uses only the fixed HTTPS raw-GitHub host, no authentication, cookies,
 or credential forwarding and rejects redirects. Limits remain four references,
 64 KiB per file, 256 KiB total and 45 seconds overall (15 seconds per request),
-with at most eight fixed files per reference. Text is staged as non-executable evidence in temporary
+with at most nine fixed files per reference (policy `approved-action-pins-v5`). Text is staged as non-executable evidence in temporary
 files; it is never imported, installed or executed. Missing or omitted approved
 context is explicit in the manifest and prevents a complete result. Other material
 external contracts still require an honest incomplete report if they cannot be

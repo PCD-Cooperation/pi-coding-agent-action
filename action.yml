@@ -59,6 +59,21 @@ inputs:
     required: false
     default: 'false'
 
+  review_coverage:
+    description: 'Opt-in coverage review in one invocation with bounded parallel workers. Requires stateful_review=true and publish_comment=true. Incomplete work never advances the checkpoint; there is no automatic continuation.'
+    required: false
+    default: 'false'
+
+  review_work_concurrency:
+    description: 'Maximum parallel coverage review workers per invocation. Integer from 1 to 3; only used when review_coverage is enabled.'
+    required: false
+    default: '3'
+
+  review_work_max_units:
+    description: 'Maximum coverage review work units per invocation. Integer from 1 to 96; only used when review_coverage is enabled. Work beyond the bound is incomplete, with no automatic continuation.'
+    required: false
+    default: '96'
+
   review_max_rounds:
     description: 'Maximum completed actionable review/fix rounds before human reassessment. Clean reviews reset the active episode, not finding history.'
     required: false
