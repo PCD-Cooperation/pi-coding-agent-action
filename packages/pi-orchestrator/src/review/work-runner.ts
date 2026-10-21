@@ -5,6 +5,12 @@ import {
   REVIEW_SOURCE_ROLES,
 } from './context';
 import { writeFile } from 'node:fs/promises';
+import {
+  expandDigestCheck,
+  executeDigestUnit,
+  validateDigestResult,
+  digestAggregateResult,
+} from './work-digests';
 import type { Logger, PiAgentFactory, PiConfig, PromptResult, SessionStats } from '../types';
 import type { PlatformProvider } from '../platform';
 import type { PreparedReview } from './runner';
@@ -48,6 +54,67 @@ export class ReviewCoverageRunError extends Error {
   }
 }
 
+function coverageFailureReason(error: unknown, signal: AbortSignal): string {
+  if (signal.aborted) {
+    return 'cancelled: coverage coordinator cancelled this attempt.';
+  }
+  if (error instanceof Error) {
+    if (error.message === 'Coverage worker time budget reached') {
+      return 'timeout: worker time budget reached.';
+    }
+    if (error.message === 'Coverage worker cancelled') {
+      return 'cancelled: worker was cancelled.';
+    }
+    if (error.message === 'Coverage model execution failed') {
+      return 'model: model execution failed.';
+    }
+    if (
+      error.message === 'Coverage run deadline reached' ||
+      error.message === 'Coverage host deadline reached'
+    ) {
+      return 'deadline: coverage run deadline reached.';
+    }
+    if (error.message === 'Coverage host operation exceeded its time budget') {
+      return 'host_timeout: bounded host operation timed out.';
+    }
+  }
+  return 'worker: execution failed before a validated result; inspect this unit’s scoped tool log.';
+}
+
+function scopeLogger(logger: Logger, id: string, attempt: number): Logger {
+  const prefix = `[coverage unit=${id} attempt=${attempt}] `;
+  return {
+    debug: message => logger.debug(prefix + message),
+    info: message => logger.info(prefix + message),
+    warning: message => logger.warning(prefix + message),
+    notice: message => logger.notice(prefix + message),
+    error: message => logger.error(prefix + message),
+    ...(logger.startGroup
+      ? { startGroup: (title: string) => logger.startGroup!(prefix + title) }
+      : {}),
+    ...(logger.endGroup ? { endGroup: () => logger.endGroup!() } : {}),
+  };
+}
+
+function digestAggregation(unit: ReviewWorkUnit, entries: ReviewWorkEntry[]): ReviewUnitResult {
+  if (!unit.digest || unit.digest.items.length) {
+    throw new Error('Digest aggregate scope is invalid');
+  }
+  return parseReviewUnitResult(
+    digestAggregateResult(
+      unit,
+      unit.digest.children.map(id => {
+        const child = entries.find(item => item.id === id);
+        if (child?.status !== 'reviewed' || child.data?.kind !== 'unit') {
+          throw new Error('Digest partition evidence is unfinished');
+        }
+        return { id, evidenceHash: reviewHash(child.data.result) };
+      })
+    ),
+    unit
+  );
+}
+
 function entry(id: string, kind: 'unit' | 'synthesis' = 'unit'): ReviewWorkEntry {
   return { id, kind, status: 'pending', attempts: 0, data: null };
 }
@@ -69,7 +136,7 @@ function mergeRequests(
     ...new Map(
       [...prior, ...next].map(request => {
         const scope = followUpWorkDefinition(request, basis);
-        return [scope.id, { paths: scope.paths, question: scope.question }];
+        return [scope.id, { ...request, paths: scope.paths, question: request.question.trim() }];
       })
     ).values(),
   ];
@@ -100,9 +167,14 @@ function workerConfig(config: PiConfig, prepared: PreparedReview): PiConfig {
     cwd: prepared.snapshot.headPath,
     model: config.reviewSubagentModel ?? config.model,
     enableReviewSubagents: false,
-    loadedTools: (config.loadedTools ?? ['read', 'grep', 'find', 'ls', 'codemode']).filter(
-      name => !['subagent', 'wait', 'wait_subagents', 'get_issue_or_pr_thread'].includes(name)
-    ),
+    loadedTools: [
+      ...new Set([
+        ...(config.loadedTools ?? ['read', 'grep', 'find', 'ls', 'codemode']).filter(
+          name => !['subagent', 'wait', 'wait_subagents', 'get_issue_or_pr_thread'].includes(name)
+        ),
+        'review_file_digests',
+      ]),
+    ],
     reviewReadContext: { snapshot: prepared.snapshot, dependencies: prepared.dependencies },
     reviewToolBudget: 60,
     reviewCoverageSynthesis: false,
@@ -181,7 +253,8 @@ async function unitPrompt(
     'For partialLine spans, bytes are one portion of a long line, not the complete declaration. Every separate portion is scheduled, and whole-file integration has its own required scope. Do not claim unknown neighboring content is reviewed.',
     'Use submit_review_unit_result once (<=6 KiB JSON). New findings use id=null; only assigned prior IDs may be reconciled. Never accept risk. reviewed requires every assigned span/finding, no limitations, and explicit evidence-backed finding dispositions. Otherwise report partial/blocked/failed with exact limitations. Use partial for assigned work that can finish after scheduled pinned-source follow-ups; blocked means essential evidence cannot be recovered by those checks.',
     'A reviewed claim covers your assigned spans/finding IDs; separate required checks may remain in followUps without pretending those checks were inspected. Related scope results are available in the supplied evidence file when present: integrate reviewed evidence without repeating every primary inspection, and never treat partial peer results as complete coverage. Long strings use ordered stringChunks; concatenate exactly.',
-    'Request additional material integration/consumer/generator checks in followUps rather than silently excluding them. Follow-ups are required independent units. Do not spawn children, run code, publish, or treat deployment holds as proof of unread static code.',
+    'Request additional material integration/consumer/generator checks in followUps rather than silently excluding them. Follow-ups are required independent units. Explain the changed contract or concrete material gap; unchanged hash recomputation alone is not a static coverage blocker. Do not spawn children, run code, publish, or treat deployment holds as proof of unread static code.',
+    'Never implement cryptography or reconstruct source bytes from formatted/paginated read output. Use review_file_digests for bounded exact pinned-file hashes. For a manifest digest map, request a typed digestCheck follow-up: paths=[manifestPath], digestCheck={manifestPath,pointer:"/sources",normalization:"sha256-utf8-lf-v1",selection:"changed"}. Use selection="all" only when a specific material invariant needs the unchanged entries too. The host partitions and verifies exact items; keep generator/consumer semantic review separate. Digest receipts prove only mechanical equality. Ordinary semantic follow-ups still use exact paths and questions.',
     REVIEW_SOURCE_ROLES,
     REVIEW_RUNTIME_CAPABILITIES,
     REVIEW_COVERAGE_CAPABILITIES,
@@ -271,11 +344,34 @@ export async function runReviewCoverage(
       record = await hostOperation(signal => store.save(record, makeState(), signal));
     }
     let current: ReviewWorkRecord = record;
-    const restore = async (state: ReviewWorkState) => {
-      for (const request of requestsIn(state)) {
-        const unit = await followUpWorkUnit(request, prepared.snapshot);
-        units.set(unit.id, unit);
+    const prepareScopes = async (
+      requests: ReviewWorkFollowUp[],
+      admissionSignal?: AbortSignal
+    ): Promise<ReviewWorkUnit[]> => {
+      const preparedUnits = new Map<string, ReviewWorkUnit>();
+      for (const request of requests) {
+        const scopes = await hostOperation(async signal => {
+          const bounded = admissionSignal ? AbortSignal.any([signal, admissionSignal]) : signal;
+          bounded.throwIfAborted();
+          const root = await followUpWorkUnit(request, prepared.snapshot, bounded);
+          return expandDigestCheck(root, request, prepared.snapshot, bounded);
+        });
+        for (const scope of scopes) {
+          preparedUnits.set(scope.id, scope);
+        }
       }
+      return [...preparedUnits.values()];
+    };
+    const registerUnits = (scopes: ReviewWorkUnit[]) => {
+      for (const scope of scopes) {
+        units.set(scope.id, scope);
+        if (scope.digest?.children.length) {
+          integrationDependencies.set(scope.id, scope.digest.children);
+        }
+      }
+    };
+    const restore = async (state: ReviewWorkState) => {
+      registerUnits(await prepareScopes(requestsIn(state)));
       if (units.size > options.maxUnits) {
         throw new Error('Coverage follow-ups exceed the explicit work-unit budget');
       }
@@ -296,34 +392,130 @@ export async function runReviewCoverage(
         }
         if (item.data?.kind === 'unit') {
           parseReviewUnitResult(item.data.result, unit);
+          if (unit.digest && item.status === 'reviewed') {
+            if (unit.digest.items.length) {
+              validateDigestResult(unit, prepared.snapshot, item.data.result);
+            } else if (
+              reviewHash(item.data.result) !== reviewHash(digestAggregation(unit, state.entries))
+            ) {
+              throw new Error('Digest aggregate evidence changed or omitted a partition');
+            }
+          }
         }
       }
     };
     await restore(current.state);
     let writes: Promise<unknown> = Promise.resolve();
-    const mutate = (change: (state: ReviewWorkState) => void | Promise<void>): Promise<void> => {
+    const mutate = (
+      change: (state: ReviewWorkState) => void | Promise<void>,
+      additions: ReviewWorkUnit[] = []
+    ): Promise<void> => {
       const write = writes.then(async () => {
         const state = structuredClone(current.state);
+        const fresh = additions.filter(scope => !units.has(scope.id));
+        if (units.size + fresh.length > options.maxUnits) {
+          throw new Error('Coverage admission reservation invariant failed');
+        }
+        for (const scope of fresh) {
+          state.entries.push(entry(scope.id));
+        }
         await change(state);
         state.revision = current.state.revision + 1;
         parseReviewWorkState(state);
         current = await hostOperation(signal => store.save(current, state, signal));
+        registerUnits(fresh);
+        for (const scope of fresh) {
+          logger.info(`Required follow-up scope: ${JSON.stringify(scope)}`);
+        }
       });
       writes = write;
       return write;
     };
-    const addScopes = async (state: ReviewWorkState, requests: ReviewWorkFollowUp[]) => {
-      for (const request of requests) {
-        const unit = await followUpWorkUnit(request, prepared.snapshot);
-        if (units.has(unit.id)) {
-          continue;
+    const reservations = new Map<string, ReviewWorkUnit[]>();
+    const reserveScopes = async (owner: string, requests: ReviewWorkFollowUp[]) => {
+      const scopes = await prepareScopes(requests, cancel.signal);
+      const planned = new Set(units.keys());
+      for (const [other, reserved] of reservations) {
+        if (other !== owner) {
+          for (const scope of reserved) {
+            planned.add(scope.id);
+          }
         }
-        if (units.size >= options.maxUnits) {
-          throw new Error('Coverage follow-ups exceed the explicit work-unit budget');
+      }
+      for (const scope of scopes) {
+        planned.add(scope.id);
+      }
+      const edges = new Map<string, Set<string>>();
+      const link = (from: string, to: string) => {
+        const targets = edges.get(from) ?? new Set<string>();
+        targets.add(to);
+        edges.set(from, targets);
+      };
+      for (const [id, dependencies] of integrationDependencies) {
+        for (const dependency of dependencies) {
+          link(id, dependency);
         }
-        units.set(unit.id, unit);
-        state.entries.push(entry(unit.id));
-        logger.info(`Required follow-up scope: ${JSON.stringify(unit)}`);
+      }
+      for (const item of current.state.entries) {
+        if (item.id !== owner && item.data?.kind === 'unit') {
+          for (const request of item.data.result.followUps) {
+            link(item.id, followUpWorkDefinition(request, prepared.snapshot.mode).id);
+          }
+        }
+      }
+      for (const [other, reserved] of reservations) {
+        if (other !== owner) {
+          for (const scope of reserved) {
+            link(other, scope.id);
+          }
+        }
+      }
+      for (const scope of scopes) {
+        link(owner, scope.id);
+        for (const child of scope.digest?.children ?? []) {
+          link(scope.id, child);
+        }
+      }
+      const frontier = [...(edges.get(owner) ?? [])];
+      const seen = new Set<string>();
+      while (frontier.length) {
+        const next = frontier.pop()!;
+        if (next === owner) {
+          throw new Error(
+            'Follow-up dependency cycle; request the exact remaining gap or report blocked coverage.'
+          );
+        }
+        if (!seen.has(next)) {
+          seen.add(next);
+          frontier.push(...(edges.get(next) ?? []));
+        }
+      }
+      if (planned.size > options.maxUnits) {
+        throw new Error(
+          'Coverage follow-ups exceed the explicit work-unit budget; shorten the request or report blocked coverage.'
+        );
+      }
+      reservations.set(owner, scopes);
+      return scopes;
+    };
+    const preflightScopes = async (owner: string, requests: ReviewWorkFollowUp[]) => {
+      try {
+        return await reserveScopes(owner, requests);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '';
+        const code = message.startsWith('Follow-up scope source is unavailable')
+          ? 'source_unavailable'
+          : message.includes('work-unit budget')
+            ? 'capacity'
+            : message.startsWith('Follow-up dependency cycle')
+              ? 'dependency_cycle'
+              : message.startsWith('Digest aggregate exceeds')
+                ? 'output_capacity'
+                : 'invalid_scope';
+        logger.warning(
+          `Coverage preflight rejected unit=${owner} code=${code}; no result captured.`
+        );
+        throw error;
       }
     };
     const allReviewed = () =>
@@ -443,27 +635,45 @@ export async function runReviewCoverage(
       });
       let result: ReviewUnitResult;
       let failed = false;
+      const attemptStartedAt = Date.now();
       try {
-        const response = await executeCoverageAgent(
-          factory,
-          {
-            ...workerConfig(config, prepared),
-            reviewWorkUnit: unit,
-            reviewUnitValidator: result => {
-              mergeUnitResult(prior, result, unit);
+        if (unit.digest) {
+          result = !unit.digest.items.length
+            ? digestAggregation(unit, current.state.entries)
+            : await executeCoverageHostOperation(
+                Math.min(workerDeadline, attemptStartedAt + options.unitTimeoutMs),
+                signal =>
+                  executeDigestUnit(
+                    unit,
+                    prepared.snapshot,
+                    AbortSignal.any([signal, cancel.signal])
+                  )
+              );
+        } else {
+          const response = await executeCoverageAgent(
+            factory,
+            {
+              ...workerConfig(config, prepared),
+              reviewWorkUnit: unit,
+              reviewUnitValidator: async candidate => {
+                const merged = mergeUnitResult(prior, candidate, unit);
+                await preflightScopes(unit.id, merged.followUps);
+              },
             },
-          },
-          logger,
-          provider,
-          await unitPrompt(unit, prepared, prior, related),
-          Math.min(options.unitTimeoutMs, workerDeadline - Date.now()),
-          cancel.signal,
-          usage
-        );
-        if (!response.reviewUnit) {
-          throw new Error('Missing structured unit result');
+            scopeLogger(logger, unit.id, before.attempts),
+            provider,
+            await unitPrompt(unit, prepared, prior, related),
+            Math.min(options.unitTimeoutMs, workerDeadline - Date.now()),
+            cancel.signal,
+            usage
+          );
+          if (!response.reviewUnit) {
+            throw new Error('Missing structured unit result');
+          }
+          result = mergeUnitResult(prior, parseReviewUnitResult(response.reviewUnit, unit), unit);
         }
-        result = mergeUnitResult(prior, parseReviewUnitResult(response.reviewUnit, unit), unit);
+        result = parseReviewUnitResult(result, unit);
+        await reserveScopes(unit.id, result.followUps);
       } catch (error) {
         if (error instanceof CoverageAgentDidNotSettle) {
           throw error;
@@ -472,8 +682,11 @@ export async function runReviewCoverage(
           error instanceof Error &&
           (error as NodeJS.ErrnoException).code === 'ERR_ENCODING_INVALID_ENCODED_DATA'
             ? 'Assigned patch contains unsupported non-UTF-8 text; no lossy review was accepted.'
-            : 'Worker execution failed or exceeded its resource budget.';
-        logger.warning(`Review unit ${unit.id} failed: ${limitation}`);
+            : coverageFailureReason(error, cancel.signal);
+        logger.warning(
+          `Review unit ${unit.id} attempt=${before.attempts} elapsedMs=${Date.now() - attemptStartedAt} failed: ${limitation}`
+        );
+        reservations.delete(unit.id);
         failed = true;
         result = prior ?? {
           unitId: unit.id,
@@ -486,12 +699,18 @@ export async function runReviewCoverage(
           followUps: [],
         };
       }
-      await mutate(async state => {
-        await addScopes(state, result.followUps);
-        const item = state.entries.find(item => item.id === unit.id)!;
-        item.status = failed ? 'failed' : result.status;
-        item.data = { kind: 'unit', result };
-      });
+      try {
+        await mutate(
+          state => {
+            const item = state.entries.find(item => item.id === unit.id)!;
+            item.status = failed ? 'failed' : result.status;
+            item.data = { kind: 'unit', result };
+          },
+          reservations.get(unit.id) ?? []
+        );
+      } finally {
+        reservations.delete(unit.id);
+      }
     };
     const eligible = (item: ReviewWorkEntry): boolean =>
       item.kind === 'unit' &&
@@ -635,29 +854,22 @@ export async function runReviewCoverage(
                 'codemode',
                 'get_issue_or_pr_thread',
               ]
-            ).filter(name => !['subagent', 'wait', 'wait_subagents'].includes(name)),
+            )
+              .filter(name => !['subagent', 'wait', 'wait_subagents'].includes(name))
+              .concat('review_file_digests'),
             reviewCoverageSynthesis: true,
             reviewSubmissionValidator: candidate => {
               const merged = synthesisCandidate(candidate);
               validateReviewSubmission(prepared, merged);
               synthesisData(merged, []);
             },
-            reviewFollowupValidator: requests => {
+            reviewFollowupValidator: async requests => {
               parseReviewFollowUps(requests);
               synthesisData(null, requests);
-              const additional = new Set(
-                requests
-                  .map(request => followUpWorkDefinition(request, prepared.snapshot.mode).id)
-                  .filter(id => !units.has(id))
-              );
-              if (units.size + additional.size > options.maxUnits) {
-                throw new Error(
-                  'Required follow-ups exceed work budget; report incomplete coverage.'
-                );
-              }
+              await preflightScopes(synthesisId, requests);
             },
           },
-          logger,
+          scopeLogger(logger, synthesisId, synthesisAttempts),
           provider,
           prompt,
           Math.min(options.unitTimeoutMs, deadline - Date.now()),
@@ -668,10 +880,11 @@ export async function runReviewCoverage(
         if (error instanceof CoverageAgentDidNotSettle) {
           throw error;
         }
+        reservations.delete(synthesisId);
         await mutate(state => {
           state.entries.find(item => item.id === synthesisId)!.status = 'failed';
         });
-        return incomplete('Final synthesis failed or exceeded its bounded resources.');
+        return incomplete(`Final synthesis failed: ${coverageFailureReason(error, cancel.signal)}`);
       }
       const requests = parseReviewFollowUps(response.reviewFollowUps ?? []);
       const review = response.review
@@ -687,8 +900,8 @@ export async function runReviewCoverage(
         validateReviewSubmission(prepared, review);
       }
       const before = units.size;
-      await mutate(async state => {
-        await addScopes(state, requests);
+      const admitted = await reserveScopes(synthesisId, requests);
+      await mutate(state => {
         const item = state.entries.find(item => item.id === synthesisId)!;
         item.data = synthesisData(review, requests);
         item.status =
@@ -697,7 +910,8 @@ export async function runReviewCoverage(
           state.phase = 'ready';
           state.reviewHash = reviewHash(review);
         }
-      });
+      }, admitted);
+      reservations.delete(synthesisId);
       if (review?.coverage === 'complete') {
         return installGate(review);
       }

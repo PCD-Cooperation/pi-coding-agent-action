@@ -2,6 +2,7 @@ import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { reviewHash, reviewIdentity } from './state';
+import { pinnedFilePath } from './work-digests';
 import type { ReviewSnapshot, ReviewStateRecord } from './types';
 import type {
   ReviewChangedFile,
@@ -12,7 +13,7 @@ import type {
   ReviewWorkUnit,
 } from './work-types';
 
-export const REVIEW_COVERAGE_VERSION = 'coverage-work-v1';
+export const REVIEW_COVERAGE_VERSION = 'coverage-work-v2';
 export const DEFAULT_REVIEW_COVERAGE_OPTIONS: Readonly<ReviewCoverageOptions> = {
   concurrency: 3,
   maxUnits: 96,
@@ -476,6 +477,22 @@ export function followUpWorkDefinition(
   if (!paths.length || paths.length > 8 || paths.some(path => !validReviewPath(path))) {
     throw new Error('Invalid follow-up source paths');
   }
+  if (request.digestCheck) {
+    const check = request.digestCheck;
+    if (paths.length !== 1 || paths[0] !== check.manifestPath) {
+      throw new Error(
+        'Digest follow-ups must name only their manifest; request semantic checks separately.'
+      );
+    }
+    return unit({
+      kind: 'followup',
+      basis,
+      question: `Native digest check: ${JSON.stringify({ manifestPath: check.manifestPath, pointer: check.pointer, normalization: check.normalization, selection: check.selection })}`,
+      paths,
+      spans: [],
+      findingIds: [],
+    });
+  }
   return unit({
     kind: 'followup',
     basis,
@@ -488,7 +505,8 @@ export function followUpWorkDefinition(
 
 export async function followUpWorkUnit(
   request: ReviewWorkFollowUp,
-  snapshot: ReviewSnapshot
+  snapshot: ReviewSnapshot,
+  signal?: AbortSignal
 ): Promise<ReviewWorkUnit> {
   const result = followUpWorkDefinition(request, snapshot.mode);
   const paths = result.paths;
@@ -499,12 +517,14 @@ export async function followUpWorkUnit(
     snapshot.previousPath,
   ].filter((value): value is string => Boolean(value));
   for (const path of paths) {
+    signal?.throwIfAborted();
     let found = false;
     for (const root of roots) {
       try {
+        signal?.throwIfAborted();
         const handle = await open(
-          resolve(root, path),
-          constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)
+          await pinnedFilePath(root, path),
+          constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | constants.O_NONBLOCK
         );
         try {
           if ((await handle.stat()).isFile()) {

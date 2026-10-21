@@ -56,6 +56,15 @@ export interface ReviewWorkSpan {
   newLines: number;
 }
 
+export type DigestNormalization = 'sha256-raw-v1' | 'sha256-utf8-lf-v1';
+
+export interface ReviewDigestCheck {
+  manifestPath: string;
+  pointer: string;
+  normalization: DigestNormalization;
+  selection: 'changed' | 'all';
+}
+
 export interface ReviewWorkUnit {
   id: string;
   kind: 'diff' | 'followup' | 'reconcile';
@@ -64,11 +73,18 @@ export interface ReviewWorkUnit {
   paths: string[];
   spans: ReviewWorkSpan[];
   findingIds: string[];
+  digest?: {
+    manifestPath: string;
+    normalization: DigestNormalization;
+    items: { path: string; expectedDigest: string }[];
+    children: string[];
+  };
 }
 
 export interface ReviewWorkFollowUp {
   paths: string[];
   question: string;
+  digestCheck?: ReviewDigestCheck;
 }
 
 export interface ReviewUnitResult {

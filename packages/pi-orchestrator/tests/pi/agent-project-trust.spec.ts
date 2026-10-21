@@ -81,7 +81,8 @@ describe('Agent SettingsManager creation', () => {
     // delegating to the real implementation so the rest of ready() works
     // normally (creates a real session with real extensions).
     piSdk.SettingsManager.create = function (cwd: string) {
-      capturedSettingsManagerCreateArgs = [cwd];
+      // ModelRuntime also creates settings; retain the Agent's earlier call.
+      capturedSettingsManagerCreateArgs.push(cwd);
       const result = originalSettingsManagerCreate.call(piSdk.SettingsManager, cwd);
       capturedSettingsManagerFromCreate = result;
       return result;
@@ -98,7 +99,7 @@ describe('Agent SettingsManager creation', () => {
     await agent.ready();
 
     // SettingsManager.create(cwd)
-    expect(capturedSettingsManagerCreateArgs.length).toBe(1);
+    expect(capturedSettingsManagerCreateArgs.length).toBeGreaterThanOrEqual(1);
     expect(capturedSettingsManagerCreateArgs[0]).toBe(process.cwd());
   });
 

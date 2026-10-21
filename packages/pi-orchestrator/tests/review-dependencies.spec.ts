@@ -89,7 +89,7 @@ describe('approved immutable dependency evidence', () => {
       expect(init).not.toHaveProperty('headers');
       expect(new URL(String(url)).username).toBe('');
     }
-    expect(result.policyVersion).toBe('approved-action-pins-v5');
+    expect(result.policyVersion).toBe('approved-action-pins-v6');
     expect(result.contexts[0]!.files.map(file => file.path)).toEqual([
       ...requiredFiles,
       ...versionedFiles,
@@ -99,6 +99,46 @@ describe('approved immutable dependency evidence', () => {
       expect(file.sha256).toBe(createHash('sha256').update('public source\r\n').digest('hex'));
       expect((await stat(file.localPath)).mode & 0o777).toBe(0o600);
     }
+  });
+
+  test('selects the declared v2 contract in the existing ninth slot without fetching a tenth file', async () => {
+    const f = await fixture();
+    f.fetcher.mockImplementation(
+      async url =>
+        new Response(
+          String(url).endsWith('/action.yml')
+            ? 'inputs:\n  review_coverage:\n    description: See docs/contracts/review-coverage-v2.md\n'
+            : 'public source\n'
+        )
+    );
+    const result = await prepareReviewDependencies(f.snapshot, f.options);
+    expect(result.complete).toBe(true);
+    expect(f.fetcher).toHaveBeenCalledTimes(9);
+    expect(result.contexts[0]!.files.map(file => file.path)).toEqual([
+      ...requiredFiles,
+      ...versionedFiles.slice(0, -1),
+      'docs/contracts/review-coverage-v2.md',
+    ]);
+    expect(
+      f.fetcher.mock.calls.some(([url]) => String(url).endsWith('/review-coverage-v1.md'))
+    ).toBe(false);
+  });
+
+  test('a declared v2 contract is required, not an optional legacy 404', async () => {
+    const f = await fixture();
+    f.fetcher.mockImplementation(
+      async url =>
+        new Response(
+          String(url).endsWith('/action.yml')
+            ? 'inputs:\n  review_coverage:\n    description: docs/contracts/review-coverage-v2.md\n'
+            : 'absent',
+          { status: String(url).endsWith('/review-coverage-v2.md') ? 404 : 200 }
+        )
+    );
+    const result = await prepareReviewDependencies(f.snapshot, f.options);
+    expect(result.complete).toBe(false);
+    expect(result.notes.join('\n')).toContain('review-coverage-v2.md');
+    expect(f.fetcher).toHaveBeenCalledTimes(9);
   });
 
   test('includes immutable action pins introduced on the actual target after the PR baseline', async () => {

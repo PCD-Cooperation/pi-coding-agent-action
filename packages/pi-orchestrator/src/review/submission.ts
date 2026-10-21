@@ -69,16 +69,48 @@ export interface ReviewSubmissionCapture {
   reset(): void;
 }
 
+export function createSubmissionReservation() {
+  let active: object | undefined;
+  return {
+    reset: () => {
+      active = undefined;
+    },
+    reserve: (message: string) => {
+      if (active) {
+        throw new Error(message);
+      }
+      const token = {};
+      active = token;
+      return {
+        assertCurrent: () => {
+          if (active !== token) {
+            throw new Error(
+              'Review submission was reset during validation; resubmit for the current run.'
+            );
+          }
+        },
+        release: () => {
+          if (active === token) {
+            active = undefined;
+          }
+        },
+      };
+    },
+  };
+}
+
 /** Capture one validated result in memory; publication belongs exclusively to the host. */
 export function createReviewSubmissionCapture(
   hasUncollectedChildren: () => boolean = () => false,
-  validateTransition?: (submission: ReviewSubmission) => void
+  validateTransition?: (submission: ReviewSubmission) => void | Promise<void>,
+  reservation = createSubmissionReservation()
 ): ReviewSubmissionCapture {
   let submission: ReviewSubmission | undefined;
   return {
     getSubmission: () => (submission ? structuredClone(submission) : undefined),
     reset: () => {
       submission = undefined;
+      reservation.reset();
     },
     factory: pi => {
       // Also guard nested calls (e.g. codemode), not just model declarations.
@@ -98,15 +130,23 @@ export function createReviewSubmissionCapture(
         execute: async (_id, params, signal, _update, ctx) => {
           signal?.throwIfAborted();
           ctx.signal?.throwIfAborted();
-          if (submission) {
-            throw new Error('Review result has already been submitted.');
+          const ticket = reservation.reserve(
+            'Review result has already been submitted or is being validated.'
+          );
+          try {
+            if (hasUncollectedChildren()) {
+              throw new Error('Incomplete review: child findings were not collected.');
+            }
+            const candidate = parseReviewSubmission(params);
+            await validateTransition?.(structuredClone(candidate));
+            signal?.throwIfAborted();
+            ctx.signal?.throwIfAborted();
+            ticket.assertCurrent();
+            submission = candidate;
+          } catch (error) {
+            ticket.release();
+            throw error;
           }
-          if (hasUncollectedChildren()) {
-            throw new Error('Incomplete review: child findings were not collected.');
-          }
-          const candidate = parseReviewSubmission(params);
-          validateTransition?.(candidate);
-          submission = candidate;
           return {
             content: [{ type: 'text', text: 'Review result captured for host validation.' }],
             details: undefined,
@@ -120,6 +160,7 @@ export function createReviewSubmissionCapture(
 
 export const STATEFUL_REVIEW_TOOLS: ReadonlySet<string> = new Set([
   'read',
+  'review_file_digests',
   'grep',
   'find',
   'ls',

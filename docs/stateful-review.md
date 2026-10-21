@@ -188,7 +188,7 @@ Default/hard maxima:
 - Primary units: 96 KiB patch bytes, 1,800 lines, 8 files and 24 spans;
   worker results: 6 KiB JSON. No source/result truncation is used to pass a gate.
 - Each model session: 5 minutes and 60 read-tool calls, including nested codemode
-  reads. Codemode model-generation globals are disabled for coverage sessions and ordinary
+  reads. Native digest batches charge one read per file, also through codemode. Codemode model-generation globals are disabled for coverage sessions and ordinary
   stateful parent sessions.
 - Coverage work admission: a 22-minute window measured from invocation start, with a 4-minute synthesis
   reserve and at most 3 synthesis attempts. Host storage operations are bounded
@@ -202,6 +202,9 @@ Default/hard maxima:
 A separate Bot manifest (`<!-- pi-stateful-review-work:v1 -->`) and persistent
 `pi-stateful-review:coverage-v1` label witness coverage history. `collecting` and
 `ready` are work phases, **not** canonical checkpoints, approvals or deployments.
+The same work comment is updated with persisted unit counts and synthesis status;
+these are not live job status, and an interrupted invocation can leave `running`
+entries behind. No question text is embedded in human progress Markdown.
 Evidence references bind repository/PR/fingerprint/entry identity and hashes;
 missing witnessed manifests, duplicate/corrupt data, missing blobs, conflicts and
 ambiguous writes fail closed. Preserve manifests, blobs and labels during rollback.
@@ -233,7 +236,22 @@ the configured budget. This proves deterministic admission, not live model quali
 latency or successful semantic completion. Validate those in a coordinated pilot
 before rollout; do not merge/deploy merely because a fixture fits.
 
-The immutable consumer interface is [coverage contract v1](contracts/review-coverage-v1.md).
+The immutable consumer interface is [coverage contract v2](contracts/review-coverage-v2.md).
+[Coverage contract v1](contracts/review-coverage-v1.md) remains the legacy contract.
+V2 adds asynchronous preflight that is awaited before result capture, atomic
+follow-up admission/capacity checks, and optional native digest recipes. A recipe
+uses `paths=[manifestPath]`, a JSON `pointer`, `normalization` (`sha256-raw-v1` or
+`sha256-utf8-lf-v1`) and `selection` (`changed` or `all`). `changed` selects against
+the whole M→H inventory, not only the incremental P→H delta. Deterministic checks
+partition at eight files and retain machine-readable receipts and root/partition
+hashes. Equality is mechanical evidence, not semantic proof; PR code is never run.
+Strict UTF-8 text hashing preserves BOM/whitespace/trailing newlines and converts
+CRLF and lone CR to LF; raw hashing preserves exact binary bytes.
+
+The work envelope/markers stay v1 and still decode legacy follow-ups. The
+`coverage-work-v2` fingerprint invalidates old work reuse, never canonical findings
+or lifecycle/pause/actionable-round state. Old rollback source rejects new recipes
+rather than silently discarding them; preserve all durable witnesses.
 
 ## Approved dependency evidence
 
@@ -242,7 +260,7 @@ source of this action: only `PCD-Cooperation/pi-coding-agent-action` and upstrea
 `shaftoe/pi-coding-agent-action`. The fixed required files are `action.yml`, the
 orchestrator, the action's Git adapter and GitHub comment publisher. The fixed
 versioned stateful runner, renderer, GitHub state provider, lifecycle implementation
-and coverage contract v1 are also staged when present; only a nonredirected 404 denotes an older version without those files.
+and the declared coverage contract are also staged when present; only a nonredirected 404 denotes an older version without those files. The contract slot selects v2 only when the pinned action's coverage input description declares its fixed v2 contract path; otherwise it selects v1. No tenth file or arbitrary fetched path is admitted.
 Their absence is disclosed, not evidence that an unknown contract is safe.
 This source-controlled allowlist is maintainer policy, not a PR or model input.
 PR-head, merge-base and actual-target references are considered for changed workflows. Mutable tags, arbitrary
@@ -257,7 +275,7 @@ package is declared as a core runtime dependency for this parsing boundary.
 The fetcher uses only the fixed HTTPS raw-GitHub host, no authentication, cookies,
 or credential forwarding and rejects redirects. Limits remain four references,
 64 KiB per file, 256 KiB total and 45 seconds overall (15 seconds per request),
-with at most nine fixed files per reference (policy `approved-action-pins-v5`). Text is staged as non-executable evidence in temporary
+with at most nine fixed files per reference (policy `approved-action-pins-v6`). Text is staged as non-executable evidence in temporary
 files; it is never imported, installed or executed. Missing or omitted approved
 context is explicit in the manifest and prevents a complete result. Other material
 external contracts still require an honest incomplete report if they cannot be

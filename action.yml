@@ -60,7 +60,7 @@ inputs:
     default: 'false'
 
   review_coverage:
-    description: 'Opt-in coverage review in one invocation with bounded parallel workers. Requires stateful_review=true and publish_comment=true. Incomplete work never advances the checkpoint; there is no automatic continuation.'
+    description: 'Opt-in coverage review in one invocation with bounded parallel workers. Requires stateful_review=true and publish_comment=true. Incomplete work never advances the checkpoint; there is no automatic continuation. See docs/contracts/review-coverage-v2.md.'
     required: false
     default: 'false'
 

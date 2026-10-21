@@ -1,7 +1,14 @@
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type {
+  ExtensionAPI,
+  ExtensionFactory,
+  ExtensionToolContext,
+  ToolDefinition,
+} from '@earendil-works/pi-coding-agent';
 import type { PlatformProvider } from '../src/platform';
 import type { Logger, PiAgentFactory, PiConfig, PromptResult, SessionStats } from '../src/types';
 import { commitReview } from '../src/review/runner';
@@ -16,7 +23,12 @@ import { parseReviewSubmission } from '../src/review/submission';
 import { reviewCoverageOptions } from '../src/review/work-plan';
 import { ReviewCoverageRunError, runReviewCoverage } from '../src/review/work-runner';
 import { parseReviewWorkState } from '../src/review/work-state';
-import { parseReviewFollowUps, parseReviewUnitResult } from '../src/review/work-submission';
+import {
+  createReviewSynthesisCapture,
+  createReviewUnitCapture,
+  parseReviewFollowUps,
+  parseReviewUnitResult,
+} from '../src/review/work-submission';
 import type {
   FindingInput,
   ReviewSnapshot,
@@ -299,8 +311,17 @@ async function fixture(count = 1, options: Partial<ReviewCoverageOptions> = {}) 
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 interface Hooks {
-  unit?: (unit: ReviewWorkUnit, attempt: number, prompt: string) => Promise<ReviewUnitResult>;
-  synthesis?: (attempt: number, prompt: string) => Promise<ReviewSubmission | ReviewWorkFollowUp[]>;
+  unit?: (
+    unit: ReviewWorkUnit,
+    attempt: number,
+    prompt: string,
+    config: PiConfig
+  ) => Promise<ReviewUnitResult>;
+  synthesis?: (
+    attempt: number,
+    prompt: string,
+    config: PiConfig
+  ) => Promise<ReviewSubmission | ReviewWorkFollowUp[]>;
   abort?: (unit: ReviewWorkUnit | undefined, attempt: number) => Promise<void>;
   dispose?: (unit: ReviewWorkUnit | undefined, attempt: number) => Promise<void>;
 }
@@ -328,34 +349,34 @@ function fakePiAgent(f: Fixture, hooks: Hooks = {}) {
       run: async prompt => {
         call.prompt = prompt;
         if (unit) {
-          const raw = hooks.unit ? await hooks.unit(unit, attempt, prompt) : reviewed(unit);
+          const raw = hooks.unit ? await hooks.unit(unit, attempt, prompt, config) : reviewed(unit);
           try {
             const result = parseReviewUnitResult(raw, unit);
             if (!config.reviewUnitValidator) {
               throw new Error('Worker capture validator missing');
             }
-            config.reviewUnitValidator(structuredClone(result));
+            await config.reviewUnitValidator(structuredClone(result));
             return { result: '', error: undefined, sessionStats: stats, reviewUnit: result };
           } catch (error) {
             validationErrors.push(error);
             throw error;
           }
         }
-        const raw = hooks.synthesis ? await hooks.synthesis(attempt, prompt) : complete();
+        const raw = hooks.synthesis ? await hooks.synthesis(attempt, prompt, config) : complete();
         try {
           if (Array.isArray(raw)) {
             const requests = parseReviewFollowUps(raw);
             if (!config.reviewFollowupValidator) {
               throw new Error('Follow-up capture validator missing');
             }
-            config.reviewFollowupValidator(structuredClone(requests));
+            await config.reviewFollowupValidator(structuredClone(requests));
             return { result: '', error: undefined, sessionStats: stats, reviewFollowUps: requests };
           }
           const review = parseReviewSubmission(raw);
           if (!config.reviewSubmissionValidator) {
             throw new Error('Synthesis capture validator missing');
           }
-          config.reviewSubmissionValidator(structuredClone(review));
+          await config.reviewSubmissionValidator(structuredClone(review));
           return { result: '', error: undefined, sessionStats: stats, review };
         } catch (error) {
           validationErrors.push(error);
@@ -403,7 +424,381 @@ async function expectUnpublished(f: Fixture, result: PromptResult, before = f.ca
   expect(f.canonical()).toEqual(before);
 }
 
+async function captureTools(factory: ExtensionFactory) {
+  const tools = new Map<string, ToolDefinition>();
+  await factory({
+    on: vi.fn(),
+    registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool),
+  } as unknown as ExtensionAPI);
+  return (name: string, value: unknown) =>
+    tools
+      .get(name)!
+      .execute('fixture-submission', value, undefined, undefined, {} as ExtensionToolContext);
+}
+
+async function manifestFixture(count: number) {
+  const f = await fixture(count, { maxUnitFiles: 8 });
+  const sources: Record<string, string> = {};
+  for (let index = 0; index < count; index++) {
+    const path = `src/file-${index}.ts`;
+    const data = await readFile(join(f.snapshot.headPath, path));
+    sources[path] = createHash('sha256')
+      .update(data.toString('utf8').replace(/\r\n?/g, '\n'))
+      .digest('hex');
+  }
+  const manifest = JSON.stringify({ sources });
+  await Promise.all(
+    [f.snapshot.headPath, f.snapshot.basePath].map(root =>
+      writeFile(join(root, 'manifest.json'), manifest)
+    )
+  );
+  const request: ReviewWorkFollowUp = {
+    paths: ['manifest.json'],
+    question: 'Verify every manifest source digest against the pinned head.',
+    digestCheck: {
+      manifestPath: 'manifest.json',
+      pointer: '/sources',
+      normalization: 'sha256-utf8-lf-v1',
+      selection: 'all',
+    },
+  };
+  return { ...f, sources, request };
+}
+
+function nativeEvidence(state: ReviewWorkState) {
+  const leaves: {
+    entryId: string;
+    result: ReviewUnitResult;
+    receipts: Record<string, unknown>[];
+  }[] = [];
+  const roots: { entryId: string; partitions: { id: string; evidenceHash: string }[] }[] = [];
+  for (const entry of state.entries) {
+    if (entry.data?.kind !== 'unit') {
+      continue;
+    }
+    const result = entry.data.result;
+    if (!result.assessment.startsWith('[') && !result.assessment.startsWith('{')) {
+      continue;
+    }
+    const evidence = JSON.parse(result.assessment);
+    if (Array.isArray(evidence)) {
+      leaves.push({ entryId: entry.id, result, receipts: evidence });
+    } else if (evidence.mechanicalOnly) {
+      roots.push({ entryId: entry.id, partitions: evidence.partitions });
+    }
+  }
+  return { leaves, roots };
+}
+
 describe('host coverage work integration', () => {
+  it('rejects unavailable worker scope before return and accepts a corrected proposal in the same session', async () => {
+    const f = await fixture(2);
+    const rejected: unknown[] = [];
+    const fake = fakePiAgent(f, {
+      unit: async (unit, attempt, _prompt, config) => {
+        if (unit.kind !== 'diff' || !unit.paths.includes('src/file-0.ts')) {
+          return reviewed(unit);
+        }
+        expect(attempt).toBe(1);
+        const capture = createReviewUnitCapture(unit, config.reviewUnitValidator);
+        const execute = await captureTools(capture.factory);
+        const invalid = reviewed(unit, {
+          followUps: [{ paths: ['src/missing.ts'], question: 'Inspect the consumer contract.' }],
+        });
+        await expect(
+          execute('submit_review_unit_result', invalid).catch(error => {
+            rejected.push(error);
+            throw error;
+          })
+        ).rejects.toThrow(/unavailable|missing|exist|source/i);
+        expect(f.store.record!.state.entries.filter(entry => entry.kind === 'unit')).toHaveLength(
+          2
+        );
+        const corrected = reviewed(unit, {
+          followUps: [{ paths: ['src/file-0.ts'], question: 'Inspect the consumer contract.' }],
+        });
+        expect(capture.getResult()).toBeUndefined();
+        await expect(execute('submit_review_unit_result', corrected)).resolves.toMatchObject({
+          terminate: true,
+        });
+        return capture.getResult()!;
+      },
+    });
+    const result = await fake.run();
+    expect(rejected).toHaveLength(1);
+    expect(fake.validationErrors).toEqual([]);
+    expect(fake.workers()).toHaveLength(3);
+    expect(fake.workers().every(call => call.attempt === 1)).toBe(true);
+    expect(JSON.stringify(f.store.record)).not.toContain('src/missing.ts');
+    expect(result.review?.coverage).toBe('complete');
+  });
+
+  it('rejects unavailable synthesis scope before return without poisoning completed workers', async () => {
+    const f = await fixture(2);
+    const fake = fakePiAgent(f, {
+      synthesis: async (attempt, _prompt, config) => {
+        if (attempt > 1) {
+          return complete();
+        }
+        const capture = createReviewSynthesisCapture(
+          config.reviewSubmissionValidator,
+          config.reviewFollowupValidator
+        );
+        const execute = await captureTools(capture.factory);
+        const before = structuredClone(
+          f.store.record!.state.entries.filter(entry => entry.kind === 'unit')
+        );
+        await expect(
+          execute('request_review_followup', {
+            requests: [{ paths: ['src/missing.ts'], question: 'Inspect synthesis source.' }],
+          })
+        ).rejects.toThrow(/unavailable|missing|exist|source/i);
+        expect(f.store.record!.state.entries.filter(entry => entry.kind === 'unit')).toEqual(
+          before
+        );
+        const requests = [{ paths: ['src/file-0.ts'], question: 'Inspect synthesis source.' }];
+        expect(capture.getFollowUps()).toBeUndefined();
+        await expect(execute('request_review_followup', { requests })).resolves.toMatchObject({
+          terminate: true,
+        });
+        return capture.getFollowUps()!;
+      },
+    });
+    const result = await fake.run();
+    expect(result.review?.coverage).toBe('complete');
+    expect(fake.validationErrors).toEqual([]);
+    expect(fake.workers()).toHaveLength(3);
+    expect(fake.workers().every(call => call.attempt === 1)).toBe(true);
+    expect(fake.syntheses()).toHaveLength(2);
+    expect(JSON.stringify(f.store.record)).not.toContain('src/missing.ts');
+  });
+
+  it('preflights concurrent proposals against shared capacity and lets the valid worker finish', async () => {
+    const f = await fixture(2, { maxUnits: 3 });
+    const bothEntered = deferred();
+    const admitted: string[] = [];
+    const rejected: unknown[] = [];
+    let entered = 0;
+    const fake = fakePiAgent(f, {
+      unit: async (unit, _attempt, _prompt, config) => {
+        if (unit.kind !== 'diff') {
+          return reviewed(unit);
+        }
+        if (++entered === 2) {
+          bothEntered.resolve();
+        }
+        await bothEntered.promise;
+        const proposal = reviewed(unit, {
+          followUps: [
+            { paths: unit.paths, question: `Inspect distinct invariant for ${unit.paths[0]}.` },
+          ],
+        });
+        try {
+          await config.reviewUnitValidator!(proposal);
+          admitted.push(unit.id);
+          return proposal;
+        } catch (error) {
+          rejected.push(error);
+          return reviewed(unit);
+        }
+      },
+    });
+    const result = await fake.run();
+    expect(admitted).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(String(rejected[0])).toMatch(/budget|capacity/i);
+    expect(result.review?.coverage).toBe('complete');
+    expect(fake.workers()).toHaveLength(3);
+    expect(fake.validationErrors).toEqual([]);
+    for (const record of f.store.journal) {
+      expect(
+        record.state.entries.filter(entry => entry.kind === 'unit').length
+      ).toBeLessThanOrEqual(3);
+    }
+    expect(f.store.record!.state.entries.every(entry => entry.status === 'reviewed')).toBe(true);
+  });
+
+  it('keeps admission storage failures fatal without persisting phantom follow-up units', async () => {
+    const f = await fixture();
+    f.store.beforeSave = state => {
+      if (state.entries.filter(entry => entry.kind === 'unit').length > 1) {
+        throw new Error('Durable admission storage unavailable');
+      }
+    };
+    const fake = fakePiAgent(f, {
+      unit: async unit =>
+        reviewed(unit, {
+          followUps: [{ paths: ['src/file-0.ts'], question: 'Inspect downstream contract.' }],
+        }),
+    });
+    await expect(fake.run()).rejects.toThrow('Durable admission storage unavailable');
+    expect(f.store.record!.state.entries.filter(entry => entry.kind === 'unit')).toHaveLength(1);
+    expect(f.store.record!.state.entries.every(entry => entry.data === null)).toBe(true);
+    expect(f.store.record!.state.phase).toBe('collecting');
+    expect(fake.workers()).toHaveLength(1);
+    expect(fake.syntheses()).toHaveLength(0);
+    expect(f.publish).not.toHaveBeenCalled();
+    expect(f.prepared.coverageGate).toBeUndefined();
+  });
+
+  it.each([64, 125])(
+    'executes %i manifest items in bounded native leaves, not model paraphrase chains',
+    async count => {
+      const f = await manifestFixture(count);
+      const fake = fakePiAgent(f, {
+        unit: async unit =>
+          reviewed(unit, {
+            followUps: unit.paths.includes('src/file-0.ts') ? [f.request] : [],
+          }),
+      });
+      const result = await fake.run();
+      expect(fake.validationErrors).toEqual([]);
+      expect(result.review?.coverage).toBe('complete');
+      const initial = Math.ceil(count / 8);
+      expect(fake.workers()).toHaveLength(initial);
+      expect(fake.workers().every(call => call.unit!.kind === 'diff')).toBe(true);
+      expect(fake.syntheses()).toHaveLength(1);
+      const state = f.store.record!.state;
+      const { leaves, roots } = nativeEvidence(state);
+      expect(leaves).toHaveLength(Math.ceil(count / 8));
+      expect(roots).toHaveLength(1);
+      expect(state.entries.filter(entry => entry.kind === 'unit')).toHaveLength(
+        initial + leaves.length + 1
+      );
+      expect(state.entries.length - 1).toBeLessThanOrEqual(96);
+      expect(state.phase).toBe('ready');
+      const receipts = leaves.flatMap(leaf => leaf.receipts);
+      expect(receipts).toHaveLength(count);
+      expect(new Set(receipts.map(receipt => receipt.path))).toEqual(
+        new Set(Object.keys(f.sources))
+      );
+      for (const receipt of receipts) {
+        const path = receipt.path as string;
+        expect(receipt).toEqual({
+          role: 'H',
+          sha: f.snapshot.headSha,
+          path,
+          algorithm: 'sha256',
+          normalization: 'sha256-utf8-lf-v1',
+          digest: f.sources[path],
+          expectedDigest: f.sources[path],
+          match: true,
+          bytes: Buffer.byteLength(await readFile(join(f.snapshot.headPath, path))),
+        });
+      }
+      expect(roots[0]!.partitions).toEqual(
+        leaves.map(leaf => ({
+          id: leaf.entryId,
+          evidenceHash: reviewHash(leaf.result),
+        }))
+      );
+      expect(f.prepared.coverageComplete?.()).toBe(true);
+      await commitReview(f.provider, f.prepared, result);
+      expect(f.publish).toHaveBeenCalledOnce();
+    }
+  );
+
+  it('retains exact native receipts across a failed synthesis invocation and reuses them on retry', async () => {
+    const f = await manifestFixture(64);
+    const first = fakePiAgent(f, {
+      synthesis: async attempt => {
+        if (attempt === 1) {
+          return [f.request];
+        }
+        throw new Error('Synthesis provider unavailable');
+      },
+    });
+    const incomplete = await first.run();
+    await expectUnpublished(f, incomplete);
+    const native = nativeEvidence(f.store.record!.state);
+    expect(native.leaves).toHaveLength(8);
+    expect(native.leaves.flatMap(leaf => leaf.receipts)).toHaveLength(64);
+    const receipts = structuredClone(native);
+    const attempts = new Map(
+      f.store.record!.state.entries.map(entry => [entry.id, entry.attempts])
+    );
+    const retry = fakePiAgent(f);
+    const result = await retry.run();
+    expect(retry.workers()).toHaveLength(0);
+    expect(retry.syntheses()).toHaveLength(1);
+    expect(nativeEvidence(f.store.record!.state)).toEqual(receipts);
+    for (const leaf of receipts.leaves) {
+      expect(f.store.record!.state.entries.find(entry => entry.id === leaf.entryId)!.attempts).toBe(
+        attempts.get(leaf.entryId)
+      );
+    }
+    expect(result.review?.coverage).toBe('complete');
+  });
+
+  it.each(['missing', 'mismatch'])(
+    'does not count a %s digest source or its root as complete',
+    async failure => {
+      const f = await manifestFixture(9);
+      const path = join(f.snapshot.headPath, 'src/file-0.ts');
+      if (failure === 'missing') {
+        await rm(path);
+      } else {
+        await writeFile(path, 'export const changedOutsideManifest = true;\n');
+      }
+      const fake = fakePiAgent(f, {
+        synthesis: async attempt => {
+          expect(attempt).toBe(1);
+          return [f.request];
+        },
+      });
+      const result = await fake.run();
+      expect(fake.syntheses()).toHaveLength(1);
+      expect(fake.workers()).toHaveLength(2);
+      expect(result.review?.coverage).toBe('incomplete');
+      expect(f.prepared.coverageComplete?.()).toBe(false);
+      const state = f.store.record!.state;
+      expect(
+        state.entries.some(
+          entry =>
+            entry.status === 'blocked' &&
+            entry.data?.kind === 'unit' &&
+            entry.data.result.limitations.some(note => /digest|unavailable/i.test(note))
+        )
+      ).toBe(true);
+      expect(state.entries.some(entry => entry.status === 'pending')).toBe(true);
+      expect(nativeEvidence(state).roots).toHaveLength(0);
+      await expectUnpublished(f, result);
+    }
+  );
+
+  it('deduplicates rephrased mechanical recipes without collapsing distinct semantic manifest checks', async () => {
+    const f = await manifestFixture(9);
+    const semantic = [
+      { paths: ['manifest.json'], question: 'Inspect manifest consumer authorization.' },
+      { paths: ['manifest.json'], question: 'Inspect manifest update transaction atomicity.' },
+    ];
+    const fake = fakePiAgent(f, {
+      synthesis: async attempt =>
+        attempt === 1
+          ? [
+              f.request,
+              { ...f.request, question: 'Recompute the same source checksums mechanically.' },
+              ...semantic,
+            ]
+          : complete(),
+    });
+    const result = await fake.run();
+    expect(result.review?.coverage).toBe('complete');
+    const native = nativeEvidence(f.store.record!.state);
+    expect(native.roots).toHaveLength(1);
+    expect(native.leaves).toHaveLength(2);
+    expect(
+      fake
+        .workers()
+        .filter(call => call.unit!.kind === 'followup')
+        .map(call => call.unit!.question)
+        .sort()
+    ).toEqual(semantic.map(request => request.question).sort());
+    expect(fake.workers()).toHaveLength(4);
+    const synthesis = f.store.record!.state.entries.find(entry => entry.kind === 'synthesis')!.data;
+    expect(synthesis?.kind === 'synthesis' && synthesis.result.followUps).toHaveLength(3);
+  });
+
   it('reviews more than three units in one call, in bounded waves, before final synthesis/publication', async () => {
     const f = await fixture(8);
     const release = deferred();
@@ -929,6 +1324,31 @@ describe('host coverage work integration', () => {
     expect(result.review?.coverage).toBe('incomplete');
     expect(fake.calls).toHaveLength(0);
     expect(f.store.record!.state.entries.find(item => item.kind === 'unit')!.attempts).toBe(2);
+    expect(f.publish).not.toHaveBeenCalled();
+  });
+
+  it('rejects a dependency cycle before capture without poisoning the write queue', async () => {
+    const f = await fixture();
+    const first = { paths: ['src/file-0.ts'], question: 'Check first contract.' };
+    const second = { paths: ['src/file-0.ts'], question: 'Check second contract.' };
+    const fake = fakePiAgent(f, {
+      unit: async unit =>
+        unit.kind === 'diff'
+          ? reviewed(unit, { followUps: [first] })
+          : reviewed(unit, {
+              status: 'partial',
+              limitations: ['Dependent contract remains.'],
+              followUps: [unit.question === first.question ? second : first],
+            }),
+    });
+    const result = await fake.run();
+    expect(result.review?.coverage).toBe('incomplete');
+    expect(fake.validationErrors).toHaveLength(2);
+    expect(fake.validationErrors.every(error => String(error).includes('dependency cycle'))).toBe(
+      true
+    );
+    expect(f.store.record!.state.entries.filter(item => item.kind === 'unit')).toHaveLength(3);
+    expect(f.store.record!.state.entries.some(item => item.status === 'running')).toBe(false);
     expect(f.publish).not.toHaveBeenCalled();
   });
 

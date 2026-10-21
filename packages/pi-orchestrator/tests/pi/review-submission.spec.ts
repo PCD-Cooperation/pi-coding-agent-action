@@ -34,7 +34,7 @@ const validSubmission = (): ReviewSubmission => ({
 
 async function setup(
   hasChildren = () => false,
-  validateTransition?: (submission: ReviewSubmission) => void
+  validateTransition?: (submission: ReviewSubmission) => void | Promise<void>
 ) {
   const capture = createReviewSubmissionCapture(hasChildren, validateTransition);
   let tool!: ToolDefinition<typeof ReviewSubmissionSchema>;
@@ -224,6 +224,55 @@ describe('submission extension', () => {
     expect(capture.getSubmission()?.coverageNotes).toBe(candidate.coverageNotes);
   });
 
+  test('awaits host validation, releases rejection, and invalidates pending runs', async () => {
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const { execute, capture } = await setup(
+      () => false,
+      () =>
+        new Promise<void>((yes, no) => {
+          resolve = yes;
+          reject = no;
+        })
+    );
+    const first = execute(validSubmission());
+    expect(capture.getSubmission()).toBeUndefined();
+    await expect(execute(validSubmission())).rejects.toThrow('already');
+    reject(new Error('host validation failed'));
+    await expect(first).rejects.toThrow('host validation failed');
+    const stale = execute(validSubmission());
+    const finishStale = resolve;
+    capture.reset();
+    const current = execute(validSubmission());
+    finishStale();
+    await expect(stale).rejects.toThrow('reset');
+    expect(capture.getSubmission()).toBeUndefined();
+    await expect(execute(validSubmission())).rejects.toThrow('already');
+    resolve();
+    await expect(current).resolves.toMatchObject({ terminate: true });
+  });
+
+  test.each(['tool', 'context'])('rechecks %s abort after async validation', async source => {
+    let resolve!: () => void;
+    const { execute, capture } = await setup(
+      () => false,
+      () =>
+        new Promise<void>(yes => {
+          resolve = yes;
+        })
+    );
+    const controller = new AbortController();
+    const pending = execute(
+      validSubmission(),
+      source === 'tool' ? controller.signal : undefined,
+      source === 'context' ? controller.signal : undefined
+    );
+    controller.abort();
+    resolve();
+    await expect(pending).rejects.toThrow();
+    expect(capture.getSubmission()).toBeUndefined();
+  });
+
   test('rejects concurrent duplicate calls without overwriting the first', async () => {
     const { execute, capture } = await setup();
     const results = await Promise.allSettled([
@@ -257,7 +306,13 @@ describe('submission extension', () => {
     for (const toolName of ['bash', 'write', 'edit', 'get_pr_diff', 'create_pr', 'tool_search']) {
       expect(guard({ toolName })).toMatchObject({ block: true });
     }
-    for (const toolName of ['read', 'codemode', 'submit_review_result', 'wait_subagents']) {
+    for (const toolName of [
+      'read',
+      'review_file_digests',
+      'codemode',
+      'submit_review_result',
+      'wait_subagents',
+    ]) {
       expect(guard({ toolName })).toBeUndefined();
     }
   });

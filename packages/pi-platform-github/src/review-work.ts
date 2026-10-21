@@ -78,13 +78,26 @@ function strings(value: unknown, hashes = false): boolean {
     value.every(item => (hashes ? hash(item) : typeof item === 'string'))
   );
 }
+function digestCheck(value: unknown): boolean {
+  return (
+    shape(value, ['manifestPath', 'pointer', 'normalization', 'selection']) &&
+    typeof value.manifestPath === 'string' &&
+    value.manifestPath.length > 0 &&
+    value.manifestPath.length <= 512 &&
+    typeof value.pointer === 'string' &&
+    value.pointer.length <= 1024 &&
+    ['sha256-raw-v1', 'sha256-utf8-lf-v1'].includes(value.normalization as string) &&
+    ['changed', 'all'].includes(value.selection as string)
+  );
+}
 function followUps(value: unknown): boolean {
   return (
     Array.isArray(value) &&
     value.length <= DATA_BYTES &&
     value.every(
       item =>
-        shape(item, ['paths', 'question']) &&
+        (shape(item, ['paths', 'question']) ||
+          (shape(item, ['paths', 'question', 'digestCheck']) && digestCheck(item.digestCheck))) &&
         strings(item.paths) &&
         typeof item.question === 'string'
     )
@@ -295,12 +308,14 @@ function decode(body: string, prefix: string): unknown {
   return value;
 }
 function renderManifest(manifest: Manifest): string {
+  const units = manifest.state.entries.filter(entry => entry.kind === 'unit');
   const counts = STATUSES.map(
-    status => `${status}: ${manifest.state.entries.filter(entry => entry.status === status).length}`
+    status => `${status}: ${units.filter(entry => entry.status === status).length}`
   ).join(', ');
+  const synthesis = manifest.state.entries.find(entry => entry.kind === 'synthesis');
   return encode(
     PREFIX,
-    `Review coverage work — ${manifest.state.phase}, revision ${manifest.state.revision}.\n${counts}.`,
+    `Review coverage work — ${manifest.state.phase}, revision ${manifest.state.revision}.\nUnits — ${counts}. Synthesis: ${synthesis?.status ?? 'not started'}.\nPersisted progress, not live job status or a canonical completion checkpoint.`,
     manifest
   );
 }
