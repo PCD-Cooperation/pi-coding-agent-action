@@ -319,6 +319,16 @@ function renderManifest(manifest: Manifest): string {
     manifest
   );
 }
+function renderLegacyManifest(manifest: Manifest): string {
+  const counts = STATUSES.map(
+    status => `${status}: ${manifest.state.entries.filter(entry => entry.status === status).length}`
+  ).join(', ');
+  return encode(
+    PREFIX,
+    `Review coverage work — ${manifest.state.phase}, revision ${manifest.state.revision}.\n${counts}.`,
+    manifest
+  );
+}
 function renderBlob(blob: Blob): string {
   return encode(
     BLOB_PREFIX,
@@ -464,7 +474,7 @@ export function createReviewWorkStore(
     association(value);
     validateState(value.state, true);
     const manifest = value as unknown as Manifest;
-    if (renderManifest(manifest) !== body) {
+    if (renderLegacyManifest(manifest) !== body && renderManifest(manifest) !== body) {
       fail();
     }
     return manifest;

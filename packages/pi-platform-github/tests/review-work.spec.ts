@@ -199,6 +199,58 @@ function gate() {
   return { promise, release };
 }
 
+function legacyManifestBody(body: string): string {
+  const manifest = payload(body);
+  const statuses = ['pending', 'running', 'reviewed', 'partial', 'blocked', 'failed'];
+  const counts = statuses
+    .map(
+      status =>
+        `${status}: ${manifest.state.entries.filter((entry: ReviewWorkEntry) => entry.status === status).length}`
+    )
+    .join(', ');
+  const encoded = body.slice(body.indexOf('\n\n<!-- pi-review-work-payload:'));
+  return `${PREFIX}\nReview coverage work — ${manifest.state.phase}, revision ${manifest.state.revision}.\n${counts}.${encoded}`;
+}
+
+describe('legacy coverage manifest upgrade', () => {
+  it.each([false, true])(
+    'loads the exact legacy summary and updates it without resetting history (blob=%s)',
+    async blob => {
+      const assessment = blob ? 'x'.repeat(20000) : 'Reviewed';
+      const f = fixture();
+      const entries: ReviewWorkEntry[] = [
+        unit(1, assessment),
+        { id: hash('synthesis'), kind: 'synthesis', status: 'pending', attempts: 0, data: null },
+      ];
+      const first = await f.store().save(null, state(entries));
+      const legacy = legacyManifestBody(first.body);
+      f.manifest().body = legacy;
+      const updates = f.issues.updateComment.mock.calls.length;
+      const store = f.store();
+      const loaded = await store.load();
+      expect(loaded).toEqual({ ...first, body: legacy });
+      expect(f.issues.updateComment).toHaveBeenCalledTimes(updates);
+      const next = await store.save(loaded, state(entries, 2));
+      expect(next.commentId).toBe(first.commentId);
+      expect(next.state.fingerprint).toBe(first.state.fingerprint);
+      expect(next.state.entries).toEqual(first.state.entries);
+      expect(next.body).toContain('Units — pending: 0');
+      expect(next.body).toContain('Synthesis: pending');
+      expect(await f.store().load()).toEqual(next);
+    }
+  );
+
+  it('rejects tampered legacy summaries rather than ignoring human-readable text', async () => {
+    const f = fixture();
+    const first = await f.store().save(null, state());
+    f.manifest().body = legacyManifestBody(first.body).replace('reviewed: 1', 'reviewed: 2');
+    await expect(f.store().load()).rejects.toThrow(
+      'history missing, corrupt, changed, or ambiguous'
+    );
+    expect(f.labels.has(LABEL)).toBe(true);
+  });
+});
+
 describe('review work request cancellation', () => {
   it.each([false, true])(
     'sets a 15-second timeout on every endpoint and propagates eligibility/request signals (signal supplied: %s)',
