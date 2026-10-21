@@ -263,9 +263,9 @@ export interface PiConfig extends DiffConfig {
   reviewCoverage?: boolean;
   reviewCoverageOptions?: Partial<ReviewCoverageOptions>;
   reviewWorkUnit?: ReviewWorkUnit;
-  reviewUnitValidator?: (result: ReviewUnitResult) => void;
+  reviewUnitValidator?: (result: ReviewUnitResult) => void | Promise<void>;
   reviewCoverageSynthesis?: boolean;
-  reviewFollowupValidator?: (requests: ReviewWorkFollowUp[]) => void;
+  reviewFollowupValidator?: (requests: ReviewWorkFollowUp[]) => void | Promise<void>;
   reviewToolBudget?: number;
   /** Host-staged read locations only; never populated from model task arguments. */
   reviewReadContext?: Readonly<{
@@ -273,7 +273,7 @@ export interface PiConfig extends DiffConfig {
     dependencies: Readonly<ReviewDependencies>;
   }>;
   /** Host-owned transition validation, run before accepting a result-tool submission. */
-  reviewSubmissionValidator?: (submission: ReviewSubmission) => void;
+  reviewSubmissionValidator?: (submission: ReviewSubmission) => void | Promise<void>;
   reviewMaxRounds?: number;
   reviewControl?: ReviewControl;
   reviewControlReason?: string;

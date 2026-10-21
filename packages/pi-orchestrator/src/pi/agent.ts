@@ -20,6 +20,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import { clampThinkingLevel, getSupportedThinkingLevels } from '@earendil-works/pi-ai';
 import { buildResourceLoaderOptions } from './resource-loader';
+import { createReviewFileDigestsFactory } from './tools/review-file-digests';
 import { createCopilotCredentials } from './copilot-credentials';
 import { REVIEW_SUBAGENTS_PACKAGE, reviewSubagentsFactory } from './review-subagents/extension';
 import { resolveExtensions } from './resource-loader';
@@ -264,18 +265,30 @@ export class Agent {
       );
     }
 
+    if (reviewWork && this.config.reviewReadContext) {
+      resourceLoaderOptions.extensionFactories.push(
+        createReviewFileDigestsFactory(this.config.reviewReadContext.snapshot)
+      );
+    }
+    const reportReadBudget = (attempted: number, limit: number) => {
+      this.logger.warning(
+        `Coverage read_budget: attemptedReadCost=${attempted} limit=${limit}; structured submission remains available.`
+      );
+    };
     if (this.config.reviewWorkUnit) {
       this.reviewUnitCapture = createReviewUnitCapture(
         this.config.reviewWorkUnit,
         this.config.reviewUnitValidator,
-        this.config.reviewToolBudget
+        this.config.reviewToolBudget,
+        reportReadBudget
       );
       resourceLoaderOptions.extensionFactories.push(this.reviewUnitCapture.factory);
     } else if (this.config.reviewCoverageSynthesis) {
       this.reviewSynthesisCapture = createReviewSynthesisCapture(
         this.config.reviewSubmissionValidator,
         this.config.reviewFollowupValidator,
-        this.config.reviewToolBudget
+        this.config.reviewToolBudget,
+        reportReadBudget
       );
       this.reviewSubmissionCapture = this.reviewSynthesisCapture;
       resourceLoaderOptions.extensionFactories.push(this.reviewSynthesisCapture.factory);
@@ -407,6 +420,7 @@ export class Agent {
       'request_review_followup',
       'codemode',
       'get_issue_or_pr_thread',
+      'review_file_digests',
     ]);
     const loadedTools = readOnlyReview
       ? [

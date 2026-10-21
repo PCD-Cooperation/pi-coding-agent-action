@@ -22,6 +22,8 @@ import {
   createReviewUnitCapture,
 } from '../../src/review/work-submission';
 import type { PiConfig } from '../../src/types';
+import { createReviewFileDigestsFactory } from '../../src/pi/tools/review-file-digests';
+import { createHash } from 'node:crypto';
 
 const unit = {
   id: 'unit-1',
@@ -38,12 +40,18 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function runScript(config: Partial<PiConfig>, code: string, guard?: ExtensionFactory) {
+async function runScript(
+  config: Partial<PiConfig>,
+  code: string,
+  guard?: ExtensionFactory,
+  nativeDigests = false
+) {
   const directory = mkdtempSync(join(tmpdir(), 'pi-codemode-capabilities-'));
   const fetch = vi.fn(() => Promise.reject(new Error('Network access is forbidden in this test')));
   vi.stubGlobal('fetch', fetch);
   try {
     writeFileSync(join(directory, 'evidence.txt'), 'Pinned evidence');
+    writeFileSync(join(directory, 'copy.txt'), 'Pinned evidence');
     const credentials = new InMemoryCredentialStore();
     await credentials.modify('anthropic', async () => ({ type: 'api_key', key: 'offline-stub' }));
     const runtime = await ModelRuntime.create({
@@ -63,6 +71,26 @@ async function runScript(config: Partial<PiConfig>, code: string, guard?: Extens
       noContextFiles: true,
       extensionFactories: [
         ...buildBuiltinAgentExtensions({ enableCodemode: true, ...config }),
+        ...(nativeDigests
+          ? [
+              createReviewFileDigestsFactory({
+                repository: 'example/repo',
+                pullNumber: 1,
+                headSha: 'a'.repeat(40),
+                baseSha: 'b'.repeat(40),
+                mergeBaseSha: 'c'.repeat(40),
+                baseRef: 'main',
+                intentHash: 'intent',
+                mode: 'full',
+                fallbackReason: null,
+                headPath: directory,
+                basePath: directory,
+                previousPath: null,
+                fullDiffPath: join(directory, 'full.diff'),
+                incrementalDiffPath: null,
+              }),
+            ]
+          : []),
         ...(guard ? [guard] : []),
       ],
     });
@@ -77,7 +105,7 @@ async function runScript(config: Partial<PiConfig>, code: string, guard?: Extens
       resourceLoader: loader,
       sessionManager: SessionManager.inMemory(directory),
       settingsManager: SettingsManager.inMemory(),
-      tools: ['read', 'codemode'],
+      tools: ['read', 'codemode', ...(nativeDigests ? ['review_file_digests'] : [])],
     });
     try {
       const classify = vi.spyOn(runtime, 'classify').mockResolvedValue({
@@ -195,6 +223,35 @@ describe('review codemode SDK capabilities', () => {
       expect(result.imageCalls).toBe(0);
     }
   );
+
+  test('native digest receipts are available through the real SDK codemode boundary', async () => {
+    const result = await runScript(
+      { reviewWorkUnit: unit },
+      `
+      const value = await tools.review_file_digests({ paths: ['evidence.txt'], role: 'H', normalization: 'sha256-utf8-lf-v1' });
+      return value;
+    `,
+      createReviewUnitCapture(unit).factory,
+      true
+    );
+    expect(result.text).toContain(createHash('sha256').update('Pinned evidence').digest('hex'));
+    expect(result.text).toContain('"sha":"' + 'a'.repeat(40) + '"');
+    expect(result.classifyCalls).toBe(0);
+  });
+
+  test('SDK codemode charges each native file instead of allowing a batch budget bypass', async () => {
+    const result = await runScript(
+      { reviewWorkUnit: unit },
+      `
+      const outcomes = await Promise.allSettled(Array.from({length: 30}, () => tools.review_file_digests({ paths: ['evidence.txt', 'copy.txt'], role: 'H', normalization: 'sha256-raw-v1' })));
+      return { completed: outcomes.filter(item => item.status === 'fulfilled').length, blocked: outcomes.filter(item => item.status === 'rejected').map(item => item.reason.message) };
+    `,
+      createReviewUnitCapture(unit).factory,
+      true
+    );
+    expect(result.text).toContain('"completed":29');
+    expect(result.text).toContain('Review read-tool budget exhausted');
+  });
 
   test('stateless codemode preserves model globals', async () => {
     const result = await runScript({ statefulReview: false }, modelScript);

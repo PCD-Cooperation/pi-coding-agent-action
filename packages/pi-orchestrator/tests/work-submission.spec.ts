@@ -72,12 +72,19 @@ const full = () => ({ coverage: 'complete', coverageNotes: '', findings: [] });
 
 async function harness(factory: ExtensionFactory) {
   const tools = new Map<string, ToolDefinition>();
-  const guards: ((event: { toolName: string; parentToolCallId?: string }) => unknown)[] = [];
+  const guards: ((event: {
+    toolName: string;
+    input: Record<string, unknown>;
+    parentToolCallId?: string;
+  }) => unknown)[] = [];
   await factory({
     registerTool: (tool: ToolDefinition) => {
       tools.set(tool.name, tool);
     },
-    on: (name: string, handler: (event: { toolName: string }) => unknown) => {
+    on: (
+      name: string,
+      handler: (event: { toolName: string; input: Record<string, unknown> }) => unknown
+    ) => {
       if (name === 'tool_call') {
         guards.push(handler);
       }
@@ -85,9 +92,13 @@ async function harness(factory: ExtensionFactory) {
   } as unknown as ExtensionAPI);
   return {
     tools,
-    guard: (toolName: string, parentToolCallId?: string) => {
+    guard: (toolName: string, parentToolCallId?: string, input: Record<string, unknown> = {}) => {
       for (const guard of guards) {
-        const blocked = guard({ toolName, ...(parentToolCallId ? { parentToolCallId } : {}) });
+        const blocked = guard({
+          toolName,
+          input,
+          ...(parentToolCallId ? { parentToolCallId } : {}),
+        });
         if (blocked) {
           return blocked;
         }
@@ -208,6 +219,35 @@ describe('review work parsing', () => {
     ).toThrow();
   });
 
+  test('accepts optional digest checks and validates manifest repository paths', () => {
+    const digestCheck = {
+      manifestPath: 'data/manifest.json',
+      pointer: '/files',
+      normalization: 'sha256-raw-v1' as const,
+      selection: 'changed' as const,
+    };
+    const requests = [{ ...followUps()[0]!, digestCheck }];
+    expect(parseReviewFollowUps(requests)).toEqual(requests);
+    expect(parseReviewUnitResult({ ...result(), followUps: requests }, unit).followUps).toEqual(
+      requests
+    );
+    for (const invalid of [
+      { manifestPath: ' ' },
+      { manifestPath: '../manifest.json' },
+      { manifestPath: '/manifest.json' },
+      { manifestPath: 'data\\manifest.json' },
+      { manifestPath: 'data/./manifest.json' },
+      { normalization: 'md5' },
+      { selection: 'none' },
+      { pointer: 1 },
+      { extra: true },
+    ]) {
+      const followUp = { ...requests[0]!, digestCheck: { ...digestCheck, ...invalid } };
+      expect(() => parseReviewFollowUps([followUp])).toThrow();
+      expect(() => parseReviewUnitResult({ ...result(), followUps: [followUp] }, unit)).toThrow();
+    }
+  });
+
   test('bounds request shapes, counts, and questions without changing data', () => {
     expect(parseReviewFollowUps(followUps())).toEqual(followUps());
     expect(parseReviewFollowUps([])).toEqual([]);
@@ -228,7 +268,142 @@ describe('review work parsing', () => {
   });
 });
 
+describe('async admission', () => {
+  test.each(['worker', 'review', 'followup'])(
+    '%s awaits validation and protects new runs',
+    async role => {
+      let resolve!: () => void;
+      let reject!: (error: Error) => void;
+      const validate = () =>
+        new Promise<void>((yes, no) => {
+          resolve = yes;
+          reject = no;
+        });
+      const capture =
+        role === 'worker'
+          ? createReviewUnitCapture(unit, validate)
+          : createReviewSynthesisCapture(validate, validate);
+      const { execute } = await harness(capture.factory);
+      const endpoint =
+        role === 'worker'
+          ? 'submit_review_unit_result'
+          : role === 'review'
+            ? 'submit_review_result'
+            : 'request_review_followup';
+      const value =
+        role === 'worker' ? result() : role === 'review' ? full() : { requests: followUps() };
+      const competitor =
+        role === 'worker'
+          ? endpoint
+          : role === 'review'
+            ? 'request_review_followup'
+            : 'submit_review_result';
+      const competingValue =
+        role === 'worker' ? value : role === 'review' ? { requests: followUps() } : full();
+      const first = execute(endpoint, value);
+      await expect(execute(competitor, competingValue)).rejects.toThrow('already');
+      reject(new Error('async host failure'));
+      await expect(first).rejects.toThrow('async host failure');
+      const stale = execute(endpoint, value);
+      const finishStale = resolve;
+      capture.reset();
+      const current = execute(endpoint, value);
+      finishStale();
+      await expect(stale).rejects.toThrow('reset');
+      await expect(execute(competitor, competingValue)).rejects.toThrow('already');
+      resolve();
+      await expect(current).resolves.toMatchObject({ terminate: true });
+    }
+  );
+
+  test.each(['worker', 'review', 'followup'])(
+    '%s rechecks signals and releases admission',
+    async role => {
+      let resolve!: () => void;
+      const validate = () =>
+        new Promise<void>(yes => {
+          resolve = yes;
+        });
+      const capture =
+        role === 'worker'
+          ? createReviewUnitCapture(unit, validate)
+          : createReviewSynthesisCapture(validate, validate);
+      const { execute } = await harness(capture.factory);
+      const endpoint =
+        role === 'worker'
+          ? 'submit_review_unit_result'
+          : role === 'review'
+            ? 'submit_review_result'
+            : 'request_review_followup';
+      const value =
+        role === 'worker' ? result() : role === 'review' ? full() : { requests: followUps() };
+      for (const context of [false, true]) {
+        const controller = new AbortController();
+        const pending = execute(
+          endpoint,
+          value,
+          context ? undefined : controller.signal,
+          context ? controller.signal : undefined
+        );
+        controller.abort();
+        resolve();
+        await expect(pending).rejects.toThrow();
+      }
+      const retry = execute(endpoint, value);
+      resolve();
+      await expect(retry).resolves.toMatchObject({ terminate: true });
+    }
+  );
+
+  test('digest paths share the read budget with codemode and nested reads', async () => {
+    const capture = createReviewUnitCapture(unit);
+    const { guard } = await harness(capture.factory);
+    expect(guard('review_file_digests', undefined, { paths: Array(9).fill('file') })).toMatchObject(
+      { block: true }
+    );
+    expect(guard('codemode')).toBeUndefined();
+    for (let index = 0; index < 7; index++) {
+      expect(
+        guard('review_file_digests', 'nested', { paths: Array(8).fill('file') })
+      ).toBeUndefined();
+    }
+    for (let index = 0; index < 3; index++) {
+      expect(guard('read', 'nested')).toBeUndefined();
+    }
+    expect(guard('review_file_digests', undefined, { paths: ['file'] })).toMatchObject({
+      block: true,
+      reason: expect.stringContaining('exhausted'),
+    });
+    expect(guard('submit_review_unit_result')).toBeUndefined();
+    capture.reset();
+    expect(guard('review_file_digests', undefined, { paths: ['file'] })).toBeUndefined();
+  });
+});
+
 describe('worker capture', () => {
+  test('reports read exhaustion once per session without closing the submission endpoint', async () => {
+    const warnings: number[][] = [];
+    const capture = createReviewUnitCapture(unit, undefined, 2, (attempted, limit) => {
+      warnings.push([attempted, limit]);
+    });
+    const { guard, execute } = await harness(capture.factory);
+    expect(guard('read')).toBeUndefined();
+    expect(guard('review_file_digests', undefined, { paths: ['first', 'second'] })).toMatchObject({
+      block: true,
+    });
+    expect(guard('read')).toMatchObject({ block: true });
+    expect(warnings).toEqual([[3, 2]]);
+    expect(guard('submit_review_unit_result')).toBeUndefined();
+    await execute('submit_review_unit_result', result());
+    capture.reset();
+    guard('read');
+    guard('review_file_digests', undefined, { paths: ['first', 'second'] });
+    expect(warnings).toEqual([
+      [3, 2],
+      [3, 2],
+    ]);
+  });
+
   test('invalid and oversized UTF-8 output is retryable before capture; no truncation', async () => {
     const capture = createReviewUnitCapture(unit);
     const { execute } = await harness(capture.factory);

@@ -3,11 +3,13 @@ import { Check } from 'typebox/value';
 import type { ExtensionFactory } from '@earendil-works/pi-coding-agent';
 import {
   createReviewSubmissionCapture,
+  createSubmissionReservation,
   FindingInputSchema,
   parseReviewSubmission,
 } from './submission';
 import type { ReviewSubmissionCapture } from './submission';
 import type { ReviewSubmission } from './types';
+import { ReviewDigestCheckSchema } from './work-digests';
 import type { ReviewUnitResult, ReviewWorkFollowUp, ReviewWorkUnit } from './work-types';
 
 const nonblank = () => Type.String({ pattern: '\\S' });
@@ -20,6 +22,7 @@ export const ReviewWorkFollowUpSchema = Type.Object(
       uniqueItems: true,
     }),
     question: Type.String({ pattern: '\\S', maxLength: 1000 }),
+    digestCheck: Type.Optional(ReviewDigestCheckSchema),
   },
   { additionalProperties: false }
 );
@@ -60,7 +63,10 @@ function requireBudget(value: unknown, bytes: number): void {
 
 function validateFollowUpPaths(requests: ReviewWorkFollowUp[]): void {
   for (const request of requests) {
-    for (const path of request.paths) {
+    for (const path of [
+      ...request.paths,
+      ...(request.digestCheck ? [request.digestCheck.manifestPath] : []),
+    ]) {
       if (
         path.trim() !== path ||
         path.includes('\\') ||
@@ -135,6 +141,7 @@ export function parseReviewUnitResult(value: unknown, unit?: ReviewWorkUnit): Re
 
 export const REVIEW_WORK_READ_TOOLS: ReadonlySet<string> = new Set([
   'read',
+  'review_file_digests',
   'grep',
   'find',
   'ls',
@@ -142,12 +149,18 @@ export const REVIEW_WORK_READ_TOOLS: ReadonlySet<string> = new Set([
   'codemode',
 ]);
 
-function readOnlyGuard(endpoints: string[], budget = 60) {
+function readOnlyGuard(
+  endpoints: string[],
+  budget = 60,
+  onExhausted?: (attempted: number, limit: number) => void
+) {
   let calls = 0;
+  let warned = false;
   const limit = Number.isFinite(budget) ? Math.max(0, Math.min(60, Math.floor(budget))) : 60;
   return {
     reset: () => {
       calls = 0;
+      warned = false;
     },
     factory: (pi => {
       pi.on('tool_call', event => {
@@ -161,7 +174,23 @@ function readOnlyGuard(endpoints: string[], budget = 60) {
               'Review work permits only read-only tools; child agents and mutations are forbidden.',
           };
         }
-        if (++calls > limit) {
+        let cost = 1;
+        if (event.toolName === 'review_file_digests') {
+          const paths = event.input.paths;
+          if (!Array.isArray(paths) || paths.length < 1 || paths.length > 8) {
+            return {
+              block: true,
+              reason: 'Review file digests require between one and eight paths.',
+            };
+          }
+          cost = paths.length;
+        }
+        calls += cost;
+        if (calls > limit) {
+          if (!warned) {
+            warned = true;
+            onExhausted?.(calls, limit);
+          }
           return {
             block: true,
             reason:
@@ -182,16 +211,19 @@ export interface ReviewUnitCapture {
 
 export function createReviewUnitCapture(
   assignedUnit: ReviewWorkUnit,
-  validate?: (result: ReviewUnitResult) => void,
-  toolBudget?: number
+  validate?: (result: ReviewUnitResult) => void | Promise<void>,
+  toolBudget?: number,
+  onReadBudgetExhausted?: (attempted: number, limit: number) => void
 ): ReviewUnitCapture {
   const unit = structuredClone(assignedUnit);
   let result: ReviewUnitResult | undefined;
-  const guard = readOnlyGuard(['submit_review_unit_result'], toolBudget);
+  const reservation = createSubmissionReservation();
+  const guard = readOnlyGuard(['submit_review_unit_result'], toolBudget, onReadBudgetExhausted);
   return {
     getResult: () => (result ? structuredClone(result) : undefined),
     reset: () => {
       result = undefined;
+      reservation.reset();
       guard.reset();
     },
     factory: pi => {
@@ -206,12 +238,20 @@ export function createReviewUnitCapture(
         execute: async (_id, params, signal, _update, ctx) => {
           signal?.throwIfAborted();
           ctx.signal?.throwIfAborted();
-          if (result) {
-            throw new Error('Review unit result has already been submitted.');
+          const ticket = reservation.reserve(
+            'Review unit result has already been submitted or is being validated.'
+          );
+          try {
+            const candidate = parseReviewUnitResult(params, unit);
+            await validate?.(structuredClone(candidate));
+            signal?.throwIfAborted();
+            ctx.signal?.throwIfAborted();
+            ticket.assertCurrent();
+            result = candidate;
+          } catch (error) {
+            ticket.release();
+            throw error;
           }
-          const candidate = parseReviewUnitResult(params, unit);
-          validate?.(structuredClone(candidate));
-          result = candidate;
           return {
             content: [{ type: 'text', text: 'Review unit result captured for host validation.' }],
             details: undefined,
@@ -228,21 +268,19 @@ export interface ReviewSynthesisCapture extends ReviewSubmissionCapture {
 }
 
 export function createReviewSynthesisCapture(
-  validateReview?: (result: ReviewSubmission) => void,
-  validateFollowUps?: (requests: ReviewWorkFollowUp[]) => void,
-  toolBudget?: number
+  validateReview?: (result: ReviewSubmission) => void | Promise<void>,
+  validateFollowUps?: (requests: ReviewWorkFollowUp[]) => void | Promise<void>,
+  toolBudget?: number,
+  onReadBudgetExhausted?: (attempted: number, limit: number) => void
 ): ReviewSynthesisCapture {
   let requests: ReviewWorkFollowUp[] | undefined;
-  const submission = createReviewSubmissionCapture(
-    () => false,
-    candidate => {
-      if (requests) {
-        throw new Error('Review follow-up requests have already been submitted.');
-      }
-      validateReview?.(candidate);
-    }
+  const reservation = createSubmissionReservation();
+  const submission = createReviewSubmissionCapture(() => false, validateReview, reservation);
+  const guard = readOnlyGuard(
+    ['submit_review_result', 'request_review_followup'],
+    toolBudget,
+    onReadBudgetExhausted
   );
-  const guard = readOnlyGuard(['submit_review_result', 'request_review_followup'], toolBudget);
   return {
     getSubmission: submission.getSubmission,
     getFollowUps: () => (requests ? structuredClone(requests) : undefined),
@@ -264,15 +302,23 @@ export function createReviewSynthesisCapture(
         execute: async (_id, params, signal, _update, ctx) => {
           signal?.throwIfAborted();
           ctx.signal?.throwIfAborted();
-          if (requests || submission.getSubmission()) {
-            throw new Error('A review result or follow-up request has already been submitted.');
+          const ticket = reservation.reserve(
+            'A review result or follow-up request has already been submitted or is being validated.'
+          );
+          try {
+            if (!Check(ReviewFollowUpsSchema, params)) {
+              throw new Error('Invalid review follow-up requests.');
+            }
+            const candidate = parseReviewFollowUps(params.requests);
+            await validateFollowUps?.(structuredClone(candidate));
+            signal?.throwIfAborted();
+            ctx.signal?.throwIfAborted();
+            ticket.assertCurrent();
+            requests = candidate;
+          } catch (error) {
+            ticket.release();
+            throw error;
           }
-          if (!Check(ReviewFollowUpsSchema, params)) {
-            throw new Error('Invalid review follow-up requests.');
-          }
-          const candidate = parseReviewFollowUps(params.requests);
-          validateFollowUps?.(structuredClone(candidate));
-          requests = candidate;
           return {
             content: [
               { type: 'text', text: 'Review follow-up requests captured for host validation.' },

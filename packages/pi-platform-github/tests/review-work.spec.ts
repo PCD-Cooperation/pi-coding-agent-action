@@ -485,6 +485,131 @@ describe('review work request cancellation', () => {
 });
 
 describe('durable review work store', () => {
+  it.each([
+    ['sha256-raw-v1', 'changed', false],
+    ['sha256-utf8-lf-v1', 'all', false],
+    ['sha256-raw-v1', 'all', true],
+    ['sha256-utf8-lf-v1', 'changed', true],
+  ] as const)(
+    'recovers digest recipes (%s, %s, blobs: %s) without changing the v1 envelope',
+    async (normalization, selection, blobs) => {
+      const f = fixture();
+      const entry = unit(1, blobs ? 'x'.repeat(20000) : 'Reviewed');
+      const result = (entry.data as Extract<ReviewWorkData, { kind: 'unit' }>).result;
+      result.followUps = [
+        {
+          paths: ['inventory.json'],
+          question: '<script>untrusted question</script>',
+          digestCheck: {
+            manifestPath: 'inventory.json',
+            pointer: '/files',
+            normalization,
+            selection,
+          },
+        },
+      ];
+      const synthesis: ReviewWorkEntry = {
+        id: hash('synthesis'),
+        kind: 'synthesis',
+        status: 'partial',
+        attempts: 1,
+        data: { kind: 'synthesis', result: { review: null, followUps: copy(result.followUps) } },
+      };
+      const saved = await f.store().save(null, state([entry, synthesis]));
+      expect(saved.body.split('\n')[0]).toBe(PREFIX);
+      expect(payload(saved.body).version).toBe(1);
+      expect(saved.body).not.toContain(result.followUps[0]!.question);
+      expect(f.blobs().length > 0).toBe(blobs);
+      const recoveredStore = f.store();
+      const recovered = await recoveredStore.load();
+      expect(recovered).toEqual(saved);
+      const next = await recoveredStore.save(recovered, state([entry, synthesis], 2));
+      expect(next.commentId).toBe(saved.commentId);
+      expect(await f.store().load()).toEqual(next);
+      expect(f.comments.filter(comment => comment.body.startsWith(PREFIX))).toHaveLength(1);
+    }
+  );
+
+  it.each([
+    null,
+    [],
+    {},
+    { manifestPath: '', pointer: '', normalization: 'sha256-raw-v1', selection: 'all' },
+    {
+      manifestPath: 'x'.repeat(513),
+      pointer: '',
+      normalization: 'sha256-raw-v1',
+      selection: 'all',
+    },
+    {
+      manifestPath: 'inventory.json',
+      pointer: 'x'.repeat(1025),
+      normalization: 'sha256-raw-v1',
+      selection: 'all',
+    },
+    { manifestPath: 1, pointer: '', normalization: 'sha256-raw-v1', selection: 'all' },
+    {
+      manifestPath: 'inventory.json',
+      pointer: null,
+      normalization: 'sha256-raw-v1',
+      selection: 'all',
+    },
+    { manifestPath: 'inventory.json', pointer: '', normalization: 'sha256', selection: 'all' },
+    {
+      manifestPath: 'inventory.json',
+      pointer: '',
+      normalization: 'sha256-raw-v1',
+      selection: 'incremental',
+    },
+    {
+      manifestPath: 'inventory.json',
+      pointer: '',
+      normalization: 'sha256-raw-v1',
+      selection: 'all',
+      extra: true,
+    },
+  ])('rejects malformed digest recipe %# on write and fresh decode', async recipe => {
+    const f = fixture();
+    const entry = unit();
+    const malformed = [
+      { paths: ['inventory.json'], question: 'Check inventory', digestCheck: recipe },
+    ];
+    const next = state([entry]);
+    (entry.data as unknown as { result: { followUps: unknown } }).result.followUps = malformed;
+    await expect(f.store().save(null, next)).rejects.toThrow();
+    expect(f.comments).toHaveLength(0);
+    await f.store().save(null, state());
+    rewrite(f.manifest(), wire => {
+      const descriptor = wire.state.entries[0].data;
+      descriptor.inline.result.followUps = malformed;
+      descriptor.hash = hash(JSON.stringify(descriptor.inline));
+    });
+    await expect(f.store().load()).rejects.toThrow();
+  });
+
+  it('updates persisted unit and synthesis status without implying an active job or completion', async () => {
+    const f = fixture();
+    const store = f.store();
+    const entries = ['reviewed', 'partial', 'failed', 'running'].map((status, index) => ({
+      ...unit(index),
+      status: status as ReviewWorkEntry['status'],
+      data: null,
+    }));
+    entries.push({ ...unit(99), kind: 'synthesis', status: 'running', data: null });
+    const first = await store.save(null, state(entries));
+    for (const status of ['reviewed', 'partial', 'failed', 'running']) {
+      expect(first.body).toContain(`${status}: 1`);
+    }
+    expect(first.body).toContain('Synthesis: running');
+    expect(first.body).toContain('not live job status');
+    entries[4]!.status = 'failed';
+    const second = await store.save(first, state(entries, 2));
+    expect(second.body).toContain('Synthesis: failed');
+    expect(second.body).toContain('not live job status or a canonical completion checkpoint');
+    expect(second.commentId).toBe(first.commentId);
+    expect(f.issues.createComment).toHaveBeenCalledOnce();
+  });
+
   it('roundtrips inline work with readable counts, enrolls only after verified creation, and leaves canonical history untouched', async () => {
     const f = fixture();
     const canonical = f.insert('<!-- pi-stateful-review:v1 -->\ncanonical F0001 and cursor');
