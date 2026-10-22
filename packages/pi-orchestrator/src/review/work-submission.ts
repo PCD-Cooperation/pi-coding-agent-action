@@ -88,8 +88,8 @@ function reviewUnitToolSchema(unit: ReviewWorkUnit) {
         Type.Array(
           references.length
             ? Type.Union(references.map(({ ref }) => Type.Literal(ref)))
-            : Type.Never(),
-          { uniqueItems: true }
+            : Type.String(),
+          { uniqueItems: true, ...(references.length ? {} : { maxItems: 0 }) }
         )
       ),
     },

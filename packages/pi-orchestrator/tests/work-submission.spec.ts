@@ -428,6 +428,30 @@ describe('host-owned worker receipts', () => {
     expect(() => parseReviewUnitReceipt(capture.getResult(), scope)).toThrow();
   });
 
+  test('zero-span questions use a portable empty-array schema and still require explicit completion', async () => {
+    const scope = { ...unit, spans: [], findingIds: [] };
+    const capture = createReviewUnitCapture(scope);
+    const { execute, tools } = await harness(capture.factory);
+    expect(tools.get('submit_review_unit_result')!.parameters).toMatchObject({
+      type: 'object',
+      properties: {
+        coveredSpans: { type: 'array', maxItems: 0, items: { type: 'string' } },
+      },
+    });
+    const partial = {
+      ...receipt(),
+      status: 'partial',
+      coveredSpans: [],
+      findings: [],
+      limitations: ['The whole-file integration question remains.'],
+    };
+    await expect(
+      execute('submit_review_unit_result', { ...partial, coveredSpans: ['S1'] })
+    ).rejects.toThrow('none');
+    await execute('submit_review_unit_result', partial);
+    expect(capture.getResult()).toMatchObject({ status: 'partial', coveredSpanIds: [] });
+  });
+
   test('invalid refs and duplicate refs reject safely, then partial S1 maps without promotion or union', async () => {
     const scope = assigned();
     const rejections: { code: string; message: string }[] = [];
