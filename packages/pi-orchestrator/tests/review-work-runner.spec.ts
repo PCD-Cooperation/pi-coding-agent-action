@@ -125,6 +125,24 @@ function reviewed(
   };
 }
 
+function modelReceipt(unit: ReviewWorkUnit, value: ReviewUnitResult) {
+  const common = {
+    status: value.status,
+    assessment: value.assessment,
+    limitations: value.limitations,
+    findings: value.findings,
+    followUps: value.followUps,
+  };
+  return value.status === 'reviewed'
+    ? common
+    : {
+        ...common,
+        coveredSpans: value.coveredSpanIds.map(
+          id => `S${unit.spans.findIndex(span => span.id === id) + 1}`
+        ),
+      };
+}
+
 const stats: SessionStats = {
   inputTokens: 3,
   outputTokens: 2,
@@ -491,6 +509,65 @@ function nativeEvidence(state: ReviewWorkState) {
 }
 
 describe('host coverage work integration', () => {
+  it('resumes four completed units and finishes a partial receipt without hash arguments or automatic promotion', async () => {
+    const f = await fixture(5);
+    const first = fakePiAgent(f, {
+      unit: async (unit, _attempt, _prompt, config) => {
+        const capture = createReviewUnitCapture(unit, config.reviewUnitValidator);
+        const execute = await captureTools(capture.factory);
+        const value = unit.paths.includes('src/file-0.ts')
+          ? reviewed(unit, {
+              status: 'partial',
+              limitations: ['Semantic inspection is unfinished.'],
+            })
+          : reviewed(unit);
+        await execute('submit_review_unit_result', modelReceipt(unit, value));
+        return capture.getResult()!;
+      },
+    });
+    expect((await first.run()).review?.coverage).toBe('incomplete');
+    expect(first.syntheses()).toHaveLength(0);
+    const saved = structuredClone(f.store.record!.state);
+    expect(saved.entries.filter(item => item.status === 'reviewed')).toHaveLength(4);
+    const partial = saved.entries.find(item => item.status === 'partial')!;
+    expect(partial.attempts).toBe(2);
+    if (partial.data?.kind !== 'unit') {
+      throw new Error('Expected a saved unit receipt');
+    }
+    expect(partial.data.result.coveredSpanIds).toHaveLength(1);
+    expect(f.publish).not.toHaveBeenCalled();
+
+    const resumed = fakePiAgent(f, {
+      unit: async (unit, _attempt, prompt, config) => {
+        expect(unit.id).toBe(partial.id);
+        const payload = JSON.parse(prompt.split('\n\n').at(-1)!) as {
+          unit: { id?: string; spans: { ref: string; id?: string }[] };
+          priorAttempt: { coveredSpans: string[]; coveredSpanIds?: string[] };
+        };
+        expect(payload.unit.id).toBeUndefined();
+        expect(payload.unit.spans).toHaveLength(1);
+        expect(payload.unit.spans[0]!.ref).toBe('S1');
+        expect(payload.unit.spans[0]!.id).toBeUndefined();
+        expect(payload.priorAttempt.coveredSpans).toEqual(['S1']);
+        expect(payload.priorAttempt.coveredSpanIds).toBeUndefined();
+        const capture = createReviewUnitCapture(unit, config.reviewUnitValidator);
+        const execute = await captureTools(capture.factory);
+        await execute('submit_review_unit_result', modelReceipt(unit, reviewed(unit)));
+        expect(capture.getResult()!.coveredSpanIds).toEqual(unit.spans.map(span => span.id));
+        return capture.getResult()!;
+      },
+    });
+    expect((await resumed.run()).review?.coverage).toBe('complete');
+    expect(resumed.workers()).toHaveLength(1);
+    expect(resumed.syntheses()).toHaveLength(1);
+    expect(f.store.record!.state.entries.find(item => item.id === partial.id)!.attempts).toBe(3);
+    for (const completed of saved.entries.filter(item => item.status === 'reviewed')) {
+      expect(f.store.record!.state.entries.find(item => item.id === completed.id)).toEqual(
+        completed
+      );
+    }
+  });
+
   it('rejects unavailable worker scope before return and accepts a corrected proposal in the same session', async () => {
     const f = await fixture(2);
     const rejected: unknown[] = [];
@@ -506,7 +583,7 @@ describe('host coverage work integration', () => {
           followUps: [{ paths: ['src/missing.ts'], question: 'Inspect the consumer contract.' }],
         });
         await expect(
-          execute('submit_review_unit_result', invalid).catch(error => {
+          execute('submit_review_unit_result', modelReceipt(unit, invalid)).catch(error => {
             rejected.push(error);
             throw error;
           })
@@ -518,7 +595,9 @@ describe('host coverage work integration', () => {
           followUps: [{ paths: ['src/file-0.ts'], question: 'Inspect the consumer contract.' }],
         });
         expect(capture.getResult()).toBeUndefined();
-        await expect(execute('submit_review_unit_result', corrected)).resolves.toMatchObject({
+        await expect(
+          execute('submit_review_unit_result', modelReceipt(unit, corrected))
+        ).resolves.toMatchObject({
           terminate: true,
         });
         return capture.getResult()!;

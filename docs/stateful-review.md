@@ -195,9 +195,21 @@ resource/consumer check, not a claim that inspecting a hash certifies its conten
 Missing material integration/consumer/generator scope becomes another required
 unit, rather than an ignored limitation or a sampled clean result.
 
-Workers submit bounded structured results. A reviewed claim must include every
-assigned span/finding ID and evidence-backed finding dispositions, with no
-limitations. These claims and read receipts are not formal semantic proof.
+Workers submit bounded structured results, not copies of host receipt hashes.
+`status=reviewed` explicitly acknowledges the entire assigned unit; omit
+`coveredSpans`. The host binds the unit ID and records all assigned span IDs.
+For `partial`, `blocked` or `failed`, `coveredSpans` selects only inspected short
+references (`S1`, `S2`, ...) from the current assignment and limitations are required.
+Every assigned prior finding still requires an explicit evidence-backed disposition
+when reviewed; the host never invents a disposition or accepts risk. Reconciled IDs
+are derived only from those explicit finding records. A reviewed result has no
+limitations. The expanded internal receipt, not just its smaller model arguments,
+must fit the existing 6 KiB JSON limit. Rejections return bounded missing/invalid
+reference or finding diagnostics; rejected results are not captured.
+Each retry supplies a full result snapshot, not a delta: prior partial coverage is
+context, never an automatic union or promotion to reviewed. Completed units remain
+reusable. Stored receipts and journal schemas retain their existing IDs and format.
+These claims and read receipts are not formal semantic proof.
 The final synthesizer reads every unit assessment/candidate, independently verifies
 material findings, integrates cross-scope behavior, deduplicates causes and
 reconciles all prior IDs. It need not repeat all primary inspections. It submits
