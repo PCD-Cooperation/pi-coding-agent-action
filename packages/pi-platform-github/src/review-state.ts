@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto';
-import { parseReviewComment } from '@alexanderfortin/pi-orchestrator';
+import {
+  parseReviewComment,
+  reviewHistoryParent,
+  reviewParentDescriptor,
+} from '@alexanderfortin/pi-orchestrator';
 import type {
   ReviewIdentity,
   ReviewSnapshot,
@@ -130,14 +134,20 @@ export function createStatefulReviewPlatform(
     };
   }
   async function loadState(): Promise<ReviewStateRecord | null> {
-    let record: ReviewStateRecord | null = null;
+    const records = new Map<number, ReviewStateRecord>();
     for (let page = 1; ; page++) {
-      const { data } = await octokit.rest.issues.listComments({
+      if (page > 100) {
+        throw new Error('Canonical review history discovery limit exceeded');
+      }
+      const { data, headers } = await octokit.rest.issues.listComments({
         ...repo,
         issue_number: pullNumber,
         per_page: 100,
         page,
       });
+      if (!Array.isArray(data) || data.length > 100) {
+        throw new Error('Invalid canonical review comments page');
+      }
       for (const comment of data) {
         if (!comment.body?.includes(MARKER)) {
           continue;
@@ -151,17 +161,64 @@ export function createStatefulReviewPlatform(
         if (!comment.body.startsWith(MARKER)) {
           continue;
         }
-        if (record) {
-          throw new Error('Duplicate canonical review comments');
+        if (!Number.isSafeInteger(comment.id) || comment.id <= 0 || records.has(comment.id)) {
+          throw new Error('Duplicate or invalid canonical review comment ID');
         }
         const state = parseReviewComment(comment.body);
         associated(state);
-        record = { commentId: comment.id, body: comment.body, state };
+        records.set(comment.id, { commentId: comment.id, body: comment.body, state });
       }
-      if (data.length < 100) {
-        return record;
+      if (data.length < 100 && !headers?.link?.includes('rel="next"')) {
+        break;
       }
     }
+    if (!records.size) {
+      return null;
+    }
+    const revisions = new Set<number>();
+    const children = new Map<number, ReviewStateRecord>();
+    let root: ReviewStateRecord | null = null;
+    for (const record of records.values()) {
+      const parent = reviewHistoryParent(record.body);
+      if (revisions.has(record.state.revision)) {
+        throw new Error('Duplicate canonical review revision');
+      }
+      revisions.add(record.state.revision);
+      if (parent === undefined || parent === null) {
+        if (root || (parent === null && record.state.revision !== 1)) {
+          throw new Error('Invalid canonical review history root');
+        }
+        root = record;
+      } else {
+        const predecessor = records.get(parent.commentId);
+        if (
+          !predecessor ||
+          children.has(parent.commentId) ||
+          parent.bodyHash !== createHash('sha256').update(predecessor.body).digest('hex') ||
+          parent.revision !== predecessor.state.revision ||
+          parent.operationKey !== predecessor.state.operationKey ||
+          record.state.revision !== parent.revision + 1
+        ) {
+          throw new Error('Invalid canonical review history chain');
+        }
+        children.set(parent.commentId, record);
+      }
+    }
+    if (!root) {
+      throw new Error('Missing canonical review history root');
+    }
+    let head = root;
+    let visited = 1;
+    while (children.has(head.commentId)) {
+      head = children.get(head.commentId)!;
+      if (++visited > records.size) {
+        throw new Error('Cyclic canonical review history');
+      }
+    }
+    if (visited !== records.size) {
+      throw new Error('Orphaned canonical review history');
+    }
+    return head;
   }
   const lifecycle = createReviewLifecycle(deps, loadState);
   return {
@@ -282,6 +339,19 @@ export function createStatefulReviewPlatform(
     async publish(expected, snapshot, state, body) {
       await requireInstallationToken();
       associated(state);
+      const parent = reviewHistoryParent(body);
+      const expectedParent = expected ? reviewParentDescriptor(expected) : null;
+      if (
+        state.revision !== (expected?.state.revision ?? 0) + 1 ||
+        (expectedParent
+          ? parent?.commentId !== expectedParent.commentId ||
+            parent.bodyHash !== expectedParent.bodyHash ||
+            parent.revision !== expectedParent.revision ||
+            parent.operationKey !== expectedParent.operationKey
+          : parent !== null)
+      ) {
+        throw new Error('Published review history does not match expected predecessor');
+      }
       const parsed = parseReviewComment(body);
       if (JSON.stringify(parsed) !== JSON.stringify(state)) {
         throw new Error('Published body does not match review state');
@@ -318,23 +388,11 @@ export function createStatefulReviewPlatform(
       }
       await lifecycle.begin(expected, state, body);
       try {
-        if (expected) {
-          await octokit.rest.issues.updateComment({
-            ...repo,
-            comment_id: expected.commentId,
-            body,
-          });
-        } else {
-          await octokit.rest.issues.createComment({ ...repo, issue_number: pullNumber, body });
-        }
+        await octokit.rest.issues.createComment({ ...repo, issue_number: pullNumber, body });
       } catch (error) {
         // A timeout may have committed. Reconcile, but never retry/create a replacement.
         const recovered = await loadState();
-        if (
-          recovered?.state.operationKey === state.operationKey &&
-          recovered.body === body &&
-          (!expected || recovered.commentId === expected.commentId)
-        ) {
+        if (recovered?.state.operationKey === state.operationKey && recovered.body === body) {
           await lifecycle.finish(recovered);
           return;
         }
@@ -342,11 +400,7 @@ export function createStatefulReviewPlatform(
         throw error;
       }
       const written = await loadState();
-      if (
-        written?.body !== body ||
-        written.state.operationKey !== state.operationKey ||
-        (expected && written.commentId !== expected.commentId)
-      ) {
+      if (written?.body !== body || written.state.operationKey !== state.operationKey) {
         throw new Error('Canonical review write could not be verified (GITHUB_TOKEN required)');
       }
       await lifecycle.finish(written);

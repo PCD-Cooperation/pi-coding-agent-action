@@ -274,6 +274,7 @@ export interface PiConfig extends DiffConfig {
   }>;
   /** Host-owned transition validation, run before accepting a result-tool submission. */
   reviewSubmissionValidator?: (submission: ReviewSubmission) => void | Promise<void>;
+  /** @deprecated Ignored; actionable review rounds are unlimited (represented by 0). */
   reviewMaxRounds?: number;
   reviewControl?: ReviewControl;
   reviewControlReason?: string;

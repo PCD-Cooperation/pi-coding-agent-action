@@ -2,12 +2,14 @@ import { createHash } from 'node:crypto';
 import { Type } from 'typebox';
 import { Compile } from 'typebox/compile';
 import { FindingInputSchema, parseReviewSubmission } from './submission';
+import { appendReviewHistory } from './history';
 import type {
   FindingInput,
   ReviewFinding,
   ReviewIdentity,
   ReviewSnapshot,
   ReviewState,
+  ReviewStateRecord,
   ReviewSubmission,
 } from './types';
 
@@ -123,6 +125,14 @@ export function isBlocker(finding: FindingInput): boolean {
   );
 }
 
+export function requiresHumanReview(state: Pick<ReviewState, 'findings'> | null): boolean {
+  return Boolean(
+    state?.findings.some(
+      finding => isOpen(finding) && finding.material && finding.origin === 'uncertain'
+    )
+  );
+}
+
 function normalizeRoot(root: string): string {
   return root.trim().toLowerCase().replace(/\s+/g, ' ');
 }
@@ -180,27 +190,22 @@ export function advanceReview(
   rawResult: unknown,
   configurationHash: string,
   operationKey: string,
-  maxRounds: number,
+  _maxRounds = 0,
   intervention: ReviewState['intervention'] = null
 ): ReviewState {
   const result = parseReviewSubmission(rawResult);
   if (result.coverage !== 'complete') {
     throw new Error(`Incomplete review; cursor unchanged: ${result.coverageNotes}`);
   }
-  if (previous?.needsHuman && intervention?.control !== 'resume') {
+  if (requiresHumanReview(previous) && intervention?.control !== 'resume') {
     throw new Error('Human reassessment is required before further automatic review.');
   }
   const { findings, nextFindingId } = reconcileFindings(previous, result, snapshot.headSha);
   const blockers = findings.filter(isBlocker);
-  const previousRounds = intervention?.control === 'resume' ? 0 : (previous?.actionableRounds ?? 0);
-  const sameFixRevision =
-    previousRounds > 0 &&
-    previous?.snapshot.headSha === snapshot.headSha &&
-    intervention?.control !== 'resume';
+  const previousRounds = previous?.actionableRounds ?? 0;
+  const sameFixRevision = previousRounds > 0 && previous?.snapshot.headSha === snapshot.headSha;
   const actionableRounds = blockers.length ? previousRounds + (sameFixRevision ? 0 : 1) : 0;
-  const uncertain = findings.some(
-    finding => isOpen(finding) && finding.material && finding.origin === 'uncertain'
-  );
+  const uncertain = requiresHumanReview({ findings });
   return parseReviewState({
     schemaVersion: 1,
     revision: (previous?.revision ?? 0) + 1,
@@ -212,7 +217,7 @@ export function advanceReview(
     fallbackReason: snapshot.fallbackReason,
     coverageNotes: result.coverageNotes,
     actionableRounds,
-    needsHuman: uncertain || actionableRounds >= maxRounds,
+    needsHuman: uncertain,
     nextFindingId,
     findings,
     intervention: intervention ?? previous?.intervention ?? null,
@@ -270,7 +275,10 @@ export function renderIncompleteReview(
   return body;
 }
 
-export function renderReviewComment(state: ReviewState): string {
+export function renderReviewComment(
+  state: ReviewState,
+  previous?: ReviewStateRecord | null
+): string {
   parseReviewState(state);
   const blockers = state.findings.filter(isBlocker);
   const observations = state.findings.filter(finding => isOpen(finding) && !isBlocker(finding));
@@ -299,13 +307,13 @@ export function renderReviewComment(state: ReviewState): string {
   }
   if (state.intervention) {
     lines.push(
-      `- Human intervention by ${display(state.intervention.actor)}: ${state.intervention.control}. ${display(state.intervention.reason)}`
+      `- Last recorded human intervention by ${display(state.intervention.actor)}: ${state.intervention.control}. ${display(state.intervention.reason)}`
     );
   }
   lines.push('', '## Review Outcome');
   lines.push(
     state.needsHuman
-      ? 'NEEDS_HUMAN: reassess unresolved review/fix churn or uncertain material origin; automatic review is paused.'
+      ? 'NEEDS_HUMAN: reassess uncertain material origin; automatic review is paused.'
       : blockers.length
         ? 'FINDINGS: material PR regressions remain unresolved.'
         : 'PASS: no material PR regressions found.'
@@ -314,7 +322,7 @@ export function renderReviewComment(state: ReviewState): string {
     '',
     `${STATE_PREFIX}${Buffer.from(JSON.stringify(state), 'utf8').toString('base64')} -->`
   );
-  const body = lines.join('\n');
+  const body = appendReviewHistory(lines.join('\n'), previous);
   if (Buffer.byteLength(body, 'utf8') > 60_000) {
     throw new Error(
       'Canonical review state exceeds the comment budget; human recovery is required.'

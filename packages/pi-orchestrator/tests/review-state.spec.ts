@@ -207,24 +207,87 @@ describe('stateful finding ledger', () => {
     ).toThrow('Incomplete review');
   });
 
-  test('three actionable rounds pause review and only authorized resume input permits continuation', () => {
+  test('six consecutive actionable reviews preserve counters and identity without a cap', () => {
+    let state = advance(null, [finding()]);
+    for (const head of ['d', 'e', 'f', 'a', 'd']) {
+      state = advance(state, [finding({ id: 'F1' })], head);
+      expect(state.needsHuman).toBe(false);
+    }
+    expect(state.completedReviews).toBe(6);
+    expect(state.revision).toBe(6);
+    expect(state.actionableRounds).toBe(6);
+    expect(state.nextFindingId).toBe(2);
+    expect(state.findings[0]).toMatchObject({ id: 'F1', firstReportedHead: snapshot.headSha });
+  });
+
+  test('a legacy cap-only pause releases without a resume or ledger reset', () => {
     const one = advance(null, [finding()]);
     const two = advance(one, [finding({ id: 'F1' })], 'd');
-    const three = advance(two, [finding({ id: 'F1' })], 'e');
+    const three = { ...advance(two, [finding({ id: 'F1' })], 'e'), needsHuman: true };
+    const next = advance(three, [finding({ id: 'F1' })], 'f');
+    expect(next).toMatchObject({
+      completedReviews: 4,
+      revision: 4,
+      actionableRounds: 4,
+      needsHuman: false,
+      nextFindingId: 2,
+    });
+    expect(next.findings).toEqual(three.findings);
     expect(three.needsHuman).toBe(true);
-    expect(() => advance(three, [finding({ id: 'F1' })], 'f')).toThrow('Human reassessment');
+  });
+
+  test('resume preserves consecutive rounds, stable IDs, closed history and revision counters', () => {
+    const first = advance(null, [finding(), finding({ rootCause: 'Other defect' })]);
+    const second = advance(
+      first,
+      [
+        finding({ id: 'F1' }),
+        finding({
+          id: 'F2',
+          rootCause: 'Other defect',
+          lifecycle: 'fixed',
+          dispositionReason: 'Fixed.',
+        }),
+      ],
+      'd'
+    );
+    const paused = advance(
+      second,
+      [finding({ id: 'F1' }), finding({ origin: 'uncertain', rootCause: 'Uncertain defect' })],
+      'e'
+    );
+    expect(paused.needsHuman).toBe(true);
+    expect(() =>
+      advance(
+        paused,
+        [
+          finding({ id: 'F1' }),
+          finding({ id: 'F3', origin: 'uncertain', rootCause: 'Uncertain defect' }),
+        ],
+        'f'
+      )
+    ).toThrow('Human reassessment');
     const resumed = advanceReview(
-      three,
-      snapshot,
-      submission([finding({ id: 'F1' })]),
+      paused,
+      { ...snapshot, headSha: 'f'.repeat(40) },
+      submission([finding({ id: 'F1' }), finding({ id: 'F3', rootCause: 'Uncertain defect' })]),
       reviewHash('c'),
       reviewHash('resume'),
-      3,
-      { actor: 'maintainer', control: 'resume', reason: 'Reassessed the retry contract.' }
+      1,
+      { actor: 'maintainer', control: 'resume', reason: 'Reassessed attribution.' }
     );
-    expect(resumed.completedReviews).toBe(4);
-    expect(resumed.actionableRounds).toBe(1);
-    expect(resumed.needsHuman).toBe(false);
+    expect(resumed).toMatchObject({
+      completedReviews: 4,
+      revision: 4,
+      actionableRounds: 4,
+      nextFindingId: 4,
+      needsHuman: false,
+    });
+    expect(resumed.findings.find(finding => finding.id === 'F1')).toEqual(first.findings[0]);
+    expect(resumed.findings.find(finding => finding.id === 'F2')).toEqual(second.findings[1]);
+    expect(resumed.findings.find(finding => finding.id === 'F3')?.firstReportedHead).toBe(
+      'e'.repeat(40)
+    );
   });
 
   test('force-pushing back to an earlier head counts as another fix attempt, not a retry', () => {
@@ -232,7 +295,7 @@ describe('stateful finding ledger', () => {
     const two = advance(one, [finding({ id: 'F1' })], 'd');
     const three = advance(two, [finding({ id: 'F1' })], 'a');
     expect(three.actionableRounds).toBe(3);
-    expect(three.needsHuman).toBe(true);
+    expect(three.needsHuman).toBe(false);
   });
 
   test('clean reviews do not exhaust a lifetime round allowance', () => {
@@ -247,7 +310,14 @@ describe('stateful finding ledger', () => {
   test('material uncertain origin requests human assessment, not a clean decision', () => {
     const state = advance(null, [finding({ origin: 'uncertain' })]);
     expect(state.needsHuman).toBe(true);
-    expect(renderReviewComment(state)).toContain('NEEDS_HUMAN');
+    expect(renderReviewComment(state)).toContain('NEEDS_HUMAN: reassess uncertain material origin');
+    expect(renderReviewComment(state)).not.toContain('churn');
+    expect(() => advance(state, [finding({ id: 'F1', origin: 'uncertain' })], 'd')).toThrow(
+      'Human reassessment'
+    );
+    expect(() => advance({ ...state, needsHuman: false }, [finding({ id: 'F1' })], 'd')).toThrow(
+      'Human reassessment'
+    );
   });
 
   test('malformed and inconsistent persisted state is rejected', () => {

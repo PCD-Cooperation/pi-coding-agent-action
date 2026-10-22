@@ -253,7 +253,7 @@ export async function prepareReviewDependencies(
   options: DependencyOptions = {}
 ): Promise<ReviewDependencies> {
   const result: ReviewDependencies = {
-    policyVersion: 'approved-action-pins-v6',
+    policyVersion: 'approved-action-pins-v7',
     complete: true,
     contexts: [],
     notes: [],
@@ -351,7 +351,7 @@ export async function prepareReviewDependencies(
     for (const file of FILES) {
       const path =
         file.path === 'docs/contracts/review-coverage-v1.md' ? coverageContract : file.path;
-      const optional = file.optional && path !== 'docs/contracts/review-coverage-v2.md';
+      const optional = file.optional && !/^docs\/contracts\/review-coverage-v[23]\.md$/.test(path);
       try {
         overall.throwIfAborted();
         const content = await fetchBounded(
@@ -372,11 +372,11 @@ export async function prepareReviewDependencies(
             inputs?: { review_coverage?: { description?: unknown } };
           } | null;
           const description = metadata?.inputs?.review_coverage?.description;
-          if (
-            typeof description === 'string' &&
-            description.includes('docs/contracts/review-coverage-v2.md')
-          ) {
-            coverageContract = 'docs/contracts/review-coverage-v2.md';
+          if (typeof description === 'string') {
+            coverageContract =
+              ['docs/contracts/review-coverage-v3.md', 'docs/contracts/review-coverage-v2.md'].find(
+                path => description.includes(path)
+              ) ?? 'docs/contracts/review-coverage-v1.md';
           }
         }
         directory ??= await mkdtemp(join(options.tempRoot ?? tmpdir(), 'pi-review-dependencies-'));

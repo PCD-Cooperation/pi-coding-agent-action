@@ -72,7 +72,7 @@ describe('gatherActionsConfig', () => {
     test('is disabled by default', () => {
       expect(gatherActionsConfig().statefulReview).toBeUndefined();
     });
-    test('parses opt-in controls and bounded rounds', () => {
+    test('parses opt-in controls and ignores the deprecated round cap', () => {
       mockCore({
         stateful_review: 'true',
         review_control: 'bootstrap',
@@ -83,14 +83,14 @@ describe('gatherActionsConfig', () => {
         statefulReview: true,
         reviewControl: 'bootstrap',
         reviewControlReason: 'Start pilot.',
-        reviewMaxRounds: 3,
+        reviewMaxRounds: 0,
       });
     });
-    test.each(['0', '-1', '1.5', 'NaN', '9007199254740992'])(
-      'rejects invalid round budget %s',
+    test.each(['', '0', '1', '3', '-1', '1.5', 'NaN', 'Infinity', '9007199254740992'])(
+      'deprecated round budget %s cannot reactivate the cap',
       value => {
         mockCore({ stateful_review: 'true', review_max_rounds: value });
-        expect(() => gatherActionsConfig()).toThrow('positive safe integer');
+        expect(gatherActionsConfig().reviewMaxRounds).toBe(0);
       }
     );
     test('requires canonical publication', () => {

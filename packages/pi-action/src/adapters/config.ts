@@ -445,15 +445,7 @@ export function gatherActionsConfig(): PiConfig {
   }
   const reviewControl = reviewControlRaw as NonNullable<PiConfig['reviewControl']>;
   const reviewControlReason = core.getInput('review_control_reason').trim();
-  const reviewMaxRoundsRaw = core.getInput('review_max_rounds').trim() || '3';
-  const reviewMaxRounds = Number(reviewMaxRoundsRaw);
-  if (
-    !/^\d+$/.test(reviewMaxRoundsRaw) ||
-    !Number.isSafeInteger(reviewMaxRounds) ||
-    reviewMaxRounds < 1
-  ) {
-    throw new Error('review_max_rounds must be a positive safe integer.');
-  }
+  const reviewMaxRounds = 0;
   if (reviewControl !== 'none' && (!statefulReview || !reviewControlReason)) {
     throw new Error('Manual review controls require stateful_review and review_control_reason.');
   }

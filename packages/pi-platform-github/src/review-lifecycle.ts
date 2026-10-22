@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { parseReviewComment } from '@alexanderfortin/pi-orchestrator';
+import { parseReviewComment, reviewHistoryParent } from '@alexanderfortin/pi-orchestrator';
 import type {
   ReviewInitializationPermit,
   ReviewState,
@@ -20,7 +20,7 @@ interface Candidate {
 }
 type Checkpoint = Candidate & { commentId: number };
 interface Receipt {
-  version: 1;
+  version: 1 | 2;
   repository: string;
   pullNumber: number;
   enrollment: Enrollment;
@@ -142,7 +142,7 @@ export function createReviewLifecycle(
         'checkpoint',
         'candidate',
       ]) ||
-      value.version !== 1 ||
+      (value.version !== 1 && value.version !== 2) ||
       value.repository !== repository ||
       value.pullNumber !== issue_number ||
       !shape(value.enrollment, ['kind', 'actor', 'reason']) ||
@@ -259,7 +259,7 @@ export function createReviewLifecycle(
     }
   }
   async function write(receipt: Receipt, previous: Stored | null): Promise<Stored> {
-    const body = encode(receipt);
+    const body = encode({ ...receipt, version: 2 });
     decode(body);
     let error: unknown;
     try {
@@ -296,6 +296,18 @@ export function createReviewLifecycle(
       actual.bodyHash === target.bodyHash &&
       actual.revision === target.revision &&
       actual.operationKey === target.operationKey
+    );
+  }
+  function anchored(body: string, state: ReviewState, predecessor: Checkpoint | null): boolean {
+    const parent = reviewHistoryParent(body);
+    return (
+      state.revision === (predecessor?.revision ?? 0) + 1 &&
+      (predecessor
+        ? parent?.commentId === predecessor.commentId &&
+          parent.bodyHash === predecessor.bodyHash &&
+          parent.revision === predecessor.revision &&
+          parent.operationKey === predecessor.operationKey
+        : parent === null)
     );
   }
   async function canonical(expected: ReviewStateRecord | null): Promise<void> {
@@ -365,7 +377,14 @@ export function createReviewLifecycle(
             fail();
           }
         } else {
-          if (!matches(previous, receipt.candidate, receipt.checkpoint?.commentId)) {
+          if (
+            !matches(previous, receipt.candidate) ||
+            (receipt.version === 2
+              ? !anchored(previous.body, previous.state, receipt.checkpoint)
+              : reviewHistoryParent(previous.body) !== undefined ||
+                (receipt.checkpoint !== null &&
+                  previous.commentId !== receipt.checkpoint.commentId))
+          ) {
             fail();
           }
           stored = await write(
@@ -399,7 +418,8 @@ export function createReviewLifecycle(
       if (
         JSON.stringify(parseReviewComment(body)) !== JSON.stringify(state) ||
         state.snapshot.repository !== repository ||
-        state.snapshot.pullNumber !== issue_number
+        state.snapshot.pullNumber !== issue_number ||
+        !anchored(body, state, cached.receipt.checkpoint)
       ) {
         fail();
       }
@@ -415,11 +435,8 @@ export function createReviewLifecycle(
       unchanged(await readReceipt(), ownedPublishing);
       await canonical(written);
       if (
-        !matches(
-          written,
-          ownedPublishing.receipt.candidate,
-          ownedPublishing.receipt.checkpoint?.commentId
-        )
+        !matches(written, ownedPublishing.receipt.candidate) ||
+        !anchored(written.body, written.state, ownedPublishing.receipt.checkpoint)
       ) {
         fail();
       }
