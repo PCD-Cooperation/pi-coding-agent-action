@@ -1,12 +1,10 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { parseReviewComment, renderReviewComment } from '@alexanderfortin/pi-orchestrator';
-import type {
-  ReviewInitializationPermit,
-  ReviewState,
-  ReviewStateRecord,
-} from '@alexanderfortin/pi-orchestrator';
+import type { ReviewInitializationPermit, ReviewState } from '@alexanderfortin/pi-orchestrator';
 import type { GitHubModuleDeps } from '../src/types';
 import { createReviewLifecycle } from '../src/review-lifecycle';
+import { createStatefulReviewPlatform } from '../src/review-state';
 
 const PREFIX = '<!-- pi-stateful-review-lifecycle:v1 -->';
 const LABEL = 'pi-stateful-review:tracked-v1';
@@ -93,12 +91,7 @@ function fixture() {
     context: { repo: { owner: 'owner', repo: 'repo' }, issue: { number: 1 } },
     octokit: { rest: { issues } },
   } as unknown as GitHubModuleDeps;
-  const load = async (): Promise<ReviewStateRecord | null> => {
-    const item = comments.find(item => item.body.startsWith('<!-- pi-stateful-review:v1 -->'));
-    return item
-      ? { commentId: item.id, body: item.body, state: parseReviewComment(item.body) }
-      : null;
-  };
+  const load = createStatefulReviewPlatform(deps).loadState;
   const lifecycle = () => createReviewLifecycle(deps, load);
   function receiptComment() {
     return comments.find(item => item.body.startsWith(PREFIX))!;
@@ -114,13 +107,14 @@ function fixture() {
     receiptComment().body = `${PREFIX}\n${Buffer.from(JSON.stringify(value)).toString('base64')}`;
   }
   function publish(value = state()) {
-    const body = renderReviewComment(value);
-    const existing = comments.find(item => item.body.startsWith('<!-- pi-stateful-review:v1 -->'));
-    if (existing) {
-      existing.body = body;
-    } else {
-      insert(body);
-    }
+    const existing = comments
+      .filter(item => item.body.startsWith('<!-- pi-stateful-review:v1 -->'))
+      .at(-1);
+    const previous = existing
+      ? { commentId: existing.id, body: existing.body, state: parseReviewComment(existing.body) }
+      : null;
+    const body = renderReviewComment(value, previous);
+    insert(body);
   }
   return {
     comments,
@@ -145,7 +139,7 @@ describe('persistent review enrollment', () => {
     await f.lifecycle().ensure(null, authorize);
     expect(f.operations).toEqual(['receipt', 'label']);
     expect(f.receipt()).toEqual({
-      version: 1,
+      version: 2,
       repository: 'owner/repo',
       pullNumber: 1,
       enrollment: permit,
@@ -162,13 +156,66 @@ describe('persistent review enrollment', () => {
     expect(f.issues.createComment).toHaveBeenCalledOnce();
     expect(f.labels).toEqual(new Set(['unrelated', LABEL]));
   });
+  it.each([false, true])(
+    'recovers an exact legacy in-place publication before append migration (previous=%s)',
+    async existing => {
+      const f = fixture();
+      if (existing) {
+        f.insert(renderReviewComment(state()));
+      }
+      const before = await f.load();
+      await f.lifecycle().ensure(before, async () => permit);
+      const next = state(existing ? 2 : 1);
+      const legacyBody = renderReviewComment(next);
+      f.changeReceipt(value => {
+        value.version = 1;
+        value.phase = 'publishing';
+        value.candidate = {
+          bodyHash: createHash('sha256').update(legacyBody).digest('hex'),
+          revision: next.revision,
+          operationKey: next.operationKey,
+        };
+      });
+      if (before) {
+        f.comments.find(item => item.id === before.commentId)!.body = legacyBody;
+      } else {
+        f.insert(legacyBody);
+      }
+      const recovered = await f.load();
+      const authorize = vi.fn(async () => null);
+      await f.lifecycle().ensure(recovered, authorize);
+      expect(f.receipt().version).toBe(2);
+      expect(f.receipt().phase).toBe('committed');
+      expect(f.receipt().checkpoint.commentId).toBe(recovered!.commentId);
+      expect(authorize).not.toHaveBeenCalled();
+      expect(
+        f.comments.filter(item => item.body.startsWith('<!-- pi-stateful-review:v1 -->'))
+      ).toHaveLength(1);
+      expect(recovered!.body).toBe(legacyBody);
+    }
+  );
+
+  it('does not recover append metadata as an unguarded legacy publishing receipt', async () => {
+    const f = fixture();
+    const lifecycle = f.lifecycle();
+    await lifecycle.ensure(null, async () => permit);
+    await lifecycle.begin(null, state(), renderReviewComment(state(), null));
+    f.changeReceipt(value => {
+      value.version = 1;
+    });
+    f.publish();
+    await expect(f.lifecycle().ensure(await f.load(), async () => null)).rejects.toThrow(
+      'refusing reset'
+    );
+  });
+
   it('repairs a failed label on an ordinary retry, but cannot begin before initialization completes', async () => {
     const f = fixture();
     const first = f.lifecycle();
     f.issues.addLabels.mockRejectedValueOnce(new Error('label unavailable'));
     await expect(first.ensure(null, async () => permit)).rejects.toThrow('label unavailable');
     expect(f.receipt().phase).toBe('pending');
-    await expect(first.begin(null, state(), renderReviewComment(state()))).rejects.toThrow();
+    await expect(first.begin(null, state(), renderReviewComment(state(), null))).rejects.toThrow();
     const ordinary = vi.fn(async () => null);
     await f.lifecycle().ensure(null, ordinary);
     expect(ordinary).not.toHaveBeenCalled();
@@ -199,7 +246,7 @@ describe('persistent review enrollment', () => {
     await lifecycle.ensure(null, async () => enrollment);
     expect(Buffer.byteLength(f.receiptComment().body)).toBeLessThanOrEqual(16 * 1024);
     const next = state();
-    await lifecycle.begin(null, next, renderReviewComment(next));
+    await lifecycle.begin(null, next, renderReviewComment(next, null));
     expect(Buffer.byteLength(f.receiptComment().body)).toBeLessThanOrEqual(16 * 1024);
     f.publish(next);
     await lifecycle.finish((await f.load())!);
@@ -226,7 +273,7 @@ describe('persistent review enrollment', () => {
     paused.needsHuman = true;
     paused.actionableRounds = 3;
     paused.nextFindingId = 12;
-    f.publish(paused);
+    f.insert(renderReviewComment(paused));
     const previous = await f.load();
     f.labels.add(LABEL);
     const authorize = vi.fn(async () => null);
@@ -335,7 +382,7 @@ describe('persistent review enrollment', () => {
     }
     if (change === 'unknown version') {
       f.changeReceipt(value => {
-        value.version = 2;
+        value.version = 3;
       });
     }
     if (change === 'extra keys') {
@@ -412,7 +459,7 @@ describe('persistent review enrollment', () => {
     f.comments.push({ ...original, id: 2000 });
     f.issues.listComments.mockClear();
     await expect(f.lifecycle().ensure(null, async () => permit)).rejects.toThrow();
-    expect(f.issues.listComments).toHaveBeenCalledTimes(2);
+    expect(f.issues.listComments).toHaveBeenCalledTimes(4);
     expect(f.issues.createComment).toHaveBeenCalledOnce();
   });
   it.each(['comments', 'labels'])(
@@ -454,6 +501,26 @@ describe('persistent review enrollment', () => {
 });
 
 describe('publication intent and recovery', () => {
+  it('repairs a failed child seal using its predecessor checkpoint, never the old comment ID', async () => {
+    const f = fixture();
+    f.publish();
+    const previous = (await f.load())!;
+    const lifecycle = f.lifecycle();
+    await lifecycle.ensure(previous, async () => null);
+    const next = state(2);
+    await lifecycle.begin(previous, next, renderReviewComment(next, previous));
+    f.publish(next);
+    const written = (await f.load())!;
+    expect(written.commentId).not.toBe(previous.commentId);
+    f.issues.updateComment.mockRejectedValueOnce(new Error('seal unavailable'));
+    await expect(lifecycle.finish(written)).rejects.toThrow('seal unavailable');
+    expect(f.receipt().checkpoint.commentId).toBe(previous.commentId);
+    expect(f.receipt().phase).toBe('publishing');
+    await f.lifecycle().ensure(written, async () => null);
+    expect(f.receipt().checkpoint.commentId).toBe(written.commentId);
+    expect(f.receipt().phase).toBe('committed');
+    expect(f.comments.find(item => item.id === previous.commentId)?.body).toBe(previous.body);
+  });
   it.each([false, true])(
     'seals exact candidate after a crash (existing checkpoint: %s)',
     async existing => {
@@ -466,7 +533,7 @@ describe('publication intent and recovery', () => {
       await lifecycle.ensure(previous, async () => permit);
       const enrollment = f.receipt().enrollment;
       const next = state(existing ? 2 : 1);
-      await lifecycle.begin(previous, next, renderReviewComment(next));
+      await lifecycle.begin(previous, next, renderReviewComment(next, previous));
       expect(f.receipt().phase).toBe('publishing');
       expect(await f.load()).toEqual(previous);
       f.publish(next);
@@ -485,25 +552,34 @@ describe('publication intent and recovery', () => {
   it('requires initialization and detects canonical/receipt changes before beginning', async () => {
     const f = fixture();
     const lifecycle = f.lifecycle();
-    await expect(lifecycle.begin(null, state(), renderReviewComment(state()))).rejects.toThrow();
+    await expect(
+      lifecycle.begin(null, state(), renderReviewComment(state(), null))
+    ).rejects.toThrow();
     await lifecycle.ensure(null, async () => permit);
     f.changeReceipt(value => {
       value.enrollment.actor = 'changed';
     });
-    await expect(lifecycle.begin(null, state(), renderReviewComment(state()))).rejects.toThrow();
+    await expect(
+      lifecycle.begin(null, state(), renderReviewComment(state(), null))
+    ).rejects.toThrow();
     expect(f.receipt().phase).toBe('pending');
     await f.lifecycle().ensure(null, async () => permit);
     f.publish();
-    await expect(lifecycle.begin(null, state(), renderReviewComment(state()))).rejects.toThrow();
+    await expect(
+      lifecycle.begin(null, state(), renderReviewComment(state(), null))
+    ).rejects.toThrow();
   });
   it('rejects a forged finish readback and a mismatched committed checkpoint', async () => {
     const f = fixture();
     const lifecycle = f.lifecycle();
     await lifecycle.ensure(null, async () => permit);
-    await lifecycle.begin(null, state(), renderReviewComment(state()));
-    f.publish(state(2));
+    await lifecycle.begin(null, state(), renderReviewComment(state(), null));
+    const forged = state();
+    forged.coverageNotes = 'Unexpected candidate body';
+    f.publish(forged);
     await expect(lifecycle.finish((await f.load())!)).rejects.toThrow();
     expect(f.receipt().phase).toBe('publishing');
+    f.comments.pop();
     f.publish();
     await lifecycle.finish((await f.load())!);
     f.publish(state(2));
@@ -513,7 +589,7 @@ describe('publication intent and recovery', () => {
     const f = fixture();
     const lifecycle = f.lifecycle();
     await lifecycle.ensure(null, async () => permit);
-    await lifecycle.begin(null, state(), renderReviewComment(state()));
+    await lifecycle.begin(null, state(), renderReviewComment(state(), null));
     f.publish();
     await lifecycle.finish((await f.load())!);
     expect(f.receipt()).toMatchObject({ phase: 'committed', candidate: null });
@@ -532,7 +608,7 @@ describe('publication intent and recovery', () => {
       const lifecycle = f.lifecycle();
       await lifecycle.ensure(previous, async () => permit);
       const next = state(2);
-      await lifecycle.begin(previous, next, renderReviewComment(next));
+      await lifecycle.begin(previous, next, renderReviewComment(next, previous));
       if (mismatch === 'missing') {
         f.comments.splice(
           f.comments.findIndex(item => item.id === previous!.commentId),
@@ -544,7 +620,9 @@ describe('publication intent and recovery', () => {
           f.comments.find(item => item.id === previous!.commentId)!.id = 999;
         }
       }
-      await expect(f.lifecycle().ensure(await f.load(), async () => permit)).rejects.toThrow();
+      await expect(
+        (async () => f.lifecycle().ensure(await f.load(), async () => permit))()
+      ).rejects.toThrow();
       expect(f.receipt().phase).toBe('publishing');
     }
   );
@@ -554,14 +632,14 @@ describe('publication intent and recovery', () => {
       const f = fixture();
       const lifecycle = f.lifecycle();
       await lifecycle.ensure(null, async () => permit);
-      await lifecycle.begin(null, state(), renderReviewComment(state()));
+      await lifecycle.begin(null, state(), renderReviewComment(state(), null));
       await lifecycle.rollbackRejected(null, { status });
       expect(f.receipt()).toMatchObject({ phase: 'pending', candidate: null, checkpoint: null });
       const retry = f.lifecycle();
       await retry.ensure(null, async () => {
         throw new Error('not new');
       });
-      await retry.begin(null, state(), renderReviewComment(state()));
+      await retry.begin(null, state(), renderReviewComment(state(), null));
       f.publish();
       await retry.finish((await f.load())!);
       expect(f.receipt().phase).toBe('committed');
@@ -574,7 +652,7 @@ describe('publication intent and recovery', () => {
     const lifecycle = f.lifecycle();
     await lifecycle.ensure(previous, async () => permit);
     const before = f.receipt();
-    await lifecycle.begin(previous, state(2), renderReviewComment(state(2)));
+    await lifecycle.begin(previous, state(2), renderReviewComment(state(2), previous));
     await lifecycle.rollbackRejected(previous, { status: 422 });
     expect(f.receipt()).toEqual(before);
     expect(await f.load()).toEqual(previous);
@@ -585,7 +663,7 @@ describe('publication intent and recovery', () => {
       const f = fixture();
       const lifecycle = f.lifecycle();
       await lifecycle.ensure(null, async () => permit);
-      await lifecycle.begin(null, state(), renderReviewComment(state()));
+      await lifecycle.begin(null, state(), renderReviewComment(state(), null));
       await lifecycle.rollbackRejected(null, { status, message: 'timeout' });
       expect(f.receipt().phase).toBe('publishing');
       expect(await f.load()).toBeNull();
@@ -596,7 +674,7 @@ describe('publication intent and recovery', () => {
     const f = fixture();
     const lifecycle = f.lifecycle();
     await lifecycle.ensure(null, async () => permit);
-    await lifecycle.begin(null, state(), renderReviewComment(state()));
+    await lifecycle.begin(null, state(), renderReviewComment(state(), null));
     f.publish();
     await expect(lifecycle.rollbackRejected(null, { status: 403 })).rejects.toThrow();
     f.comments.splice(
@@ -643,9 +721,9 @@ describe('publication intent and recovery', () => {
       f.issues.listComments.mockRejectedValueOnce(new Error('readback unavailable'));
       throw new Error('timeout');
     });
-    await expect(lifecycle.begin(null, state(), renderReviewComment(state()))).rejects.toThrow(
-      'readback unavailable'
-    );
+    await expect(
+      lifecycle.begin(null, state(), renderReviewComment(state(), null))
+    ).rejects.toThrow('readback unavailable');
     await lifecycle.rollbackRejected(null, { status: 403 });
     expect(f.receipt().phase).toBe('publishing');
     await expect(f.lifecycle().ensure(null, async () => permit)).rejects.toThrow();

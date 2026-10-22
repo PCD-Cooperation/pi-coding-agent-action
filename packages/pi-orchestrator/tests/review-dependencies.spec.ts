@@ -89,7 +89,7 @@ describe('approved immutable dependency evidence', () => {
       expect(init).not.toHaveProperty('headers');
       expect(new URL(String(url)).username).toBe('');
     }
-    expect(result.policyVersion).toBe('approved-action-pins-v6');
+    expect(result.policyVersion).toBe('approved-action-pins-v7');
     expect(result.contexts[0]!.files.map(file => file.path)).toEqual([
       ...requiredFiles,
       ...versionedFiles,
@@ -124,22 +124,43 @@ describe('approved immutable dependency evidence', () => {
     ).toBe(false);
   });
 
-  test('a declared v2 contract is required, not an optional legacy 404', async () => {
+  test('selects the v3 append-only contract in the same ninth slot', async () => {
     const f = await fixture();
     f.fetcher.mockImplementation(
       async url =>
         new Response(
           String(url).endsWith('/action.yml')
-            ? 'inputs:\n  review_coverage:\n    description: docs/contracts/review-coverage-v2.md\n'
-            : 'absent',
-          { status: String(url).endsWith('/review-coverage-v2.md') ? 404 : 200 }
+            ? 'inputs:\n  review_coverage:\n    description: docs/contracts/review-coverage-v3.md\n'
+            : 'public source\n'
         )
     );
     const result = await prepareReviewDependencies(f.snapshot, f.options);
-    expect(result.complete).toBe(false);
-    expect(result.notes.join('\n')).toContain('review-coverage-v2.md');
+    expect(result.complete).toBe(true);
     expect(f.fetcher).toHaveBeenCalledTimes(9);
+    expect(result.contexts[0]!.files.at(-1)!.path).toBe('docs/contracts/review-coverage-v3.md');
+    expect(result.contexts[0]!.files).toHaveLength(9);
   });
+
+  test.each([2, 3])(
+    'a declared v%s contract is required, not an optional legacy 404',
+    async version => {
+      const f = await fixture();
+      const contract = `review-coverage-v${version}.md`;
+      f.fetcher.mockImplementation(
+        async url =>
+          new Response(
+            String(url).endsWith('/action.yml')
+              ? `inputs:\n  review_coverage:\n    description: docs/contracts/${contract}\n`
+              : 'absent',
+            { status: String(url).endsWith(`/${contract}`) ? 404 : 200 }
+          )
+      );
+      const result = await prepareReviewDependencies(f.snapshot, f.options);
+      expect(result.complete).toBe(false);
+      expect(result.notes.join('\n')).toContain(contract);
+      expect(f.fetcher).toHaveBeenCalledTimes(9);
+    }
+  );
 
   test('includes immutable action pins introduced on the actual target after the PR baseline', async () => {
     const f = await fixture();

@@ -656,7 +656,7 @@ describe('GitHub review initialization receipts', () => {
     expect(f.prepare).not.toHaveBeenCalled();
   });
 
-  it('adopts valid legacy state and updates its canonical ID independently from the receipt', async () => {
+  it('adopts legacy state and appends without editing its canonical ID', async () => {
     const f = fixture();
     f.setComments([comment(renderReviewComment(state()))]);
     const previous = await f.provider.loadState();
@@ -667,15 +667,16 @@ describe('GitHub review initialization receipts', () => {
     next.revision++;
     next.completedReviews++;
     next.operationKey = 'f'.repeat(64);
-    await f.provider.publish(previous, snapshot, next, renderReviewComment(next));
+    await f.provider.publish(previous, snapshot, next, renderReviewComment(next, previous));
     expect(await f.provider.loadState()).toEqual({
-      commentId: previous!.commentId,
-      body: renderReviewComment(next),
+      commentId: expect.any(Number),
+      body: renderReviewComment(next, previous),
       state: next,
     });
-    expect(f.canonicalCreates()).toHaveLength(0);
-    expect(f.canonicalUpdates()).toHaveLength(1);
-    expect(f.comments()).toHaveLength(2);
+    expect(f.canonicalCreates()).toHaveLength(1);
+    expect(f.canonicalUpdates()).toHaveLength(0);
+    expect(f.comments()).toHaveLength(3);
+    expect(f.comments().find(item => item.id === previous!.commentId)?.body).toBe(previous!.body);
     await f.newPlatform().ensureInitialized!(await f.provider.loadState(), authorizeNew);
     expect(authorizeNew).not.toHaveBeenCalled();
   });
@@ -686,7 +687,7 @@ describe('GitHub review initialization receipts', () => {
     const rejected = Object.assign(new Error('Validation failed'), { status: 422 });
     f.issues.createComment.mockRejectedValueOnce(rejected);
     await expect(
-      f.provider.publish(null, snapshot, state(), renderReviewComment(state()))
+      f.provider.publish(null, snapshot, state(), renderReviewComment(state(), null))
     ).rejects.toBe(rejected);
     expect(await f.provider.loadState()).toBeNull();
     expect(f.canonicalCreates()).toHaveLength(1);
@@ -695,7 +696,7 @@ describe('GitHub review initialization receipts', () => {
     const authorizeNew = vi.fn(async () => null);
     await retry.ensureInitialized!(null, authorizeNew);
     expect(authorizeNew).not.toHaveBeenCalled();
-    await retry.publish(null, snapshot, state(), renderReviewComment(state()));
+    await retry.publish(null, snapshot, state(), renderReviewComment(state(), null));
     expect(f.canonicalCreates()).toHaveLength(2);
     expect((await retry.loadState())?.state).toEqual(state());
   });
@@ -704,11 +705,11 @@ describe('GitHub review initialization receipts', () => {
     const f = fixture();
     await f.initialize();
     const next = state();
-    next.revision = 7;
-    next.completedReviews = 7;
-    next.actionableRounds = 3;
+    next.revision = 1;
+    next.completedReviews = 1;
+    next.actionableRounds = 1;
     next.nextFindingId = 12;
-    const body = renderReviewComment(next);
+    const body = renderReviewComment(next, null);
     const sealError = new Error('Receipt seal unavailable');
     const update = f.issues.updateComment.getMockImplementation()!;
     f.issues.updateComment.mockImplementation(async args => {
@@ -740,7 +741,7 @@ describe('GitHub review initialization receipts', () => {
   it('rejects a missing committed canonical even with a bootstrap permit', async () => {
     const f = fixture();
     await f.initialize();
-    await f.provider.publish(null, snapshot, state(), renderReviewComment(state()));
+    await f.provider.publish(null, snapshot, state(), renderReviewComment(state(), null));
     f.setComments(f.comments().filter(item => !item.body.startsWith(MARKER)));
     const authorizeNew = vi.fn(async () => ({
       kind: 'bootstrap' as const,
@@ -760,7 +761,7 @@ describe('GitHub review initialization receipts', () => {
     const updates = f.issues.updateComment.mock.calls.length;
     f.refObject.sha = 'f'.repeat(40);
     await expect(
-      f.provider.publish(null, snapshot, state(), renderReviewComment(state()))
+      f.provider.publish(null, snapshot, state(), renderReviewComment(state(), null))
     ).rejects.toThrow('Stale');
     expect(f.comments()).toEqual(receipts);
     expect(f.issues.updateComment).toHaveBeenCalledTimes(updates);
@@ -793,10 +794,158 @@ describe('GitHub review initialization receipts', () => {
   it('does not allow direct publication to bypass initialization', async () => {
     const f = fixture();
     await expect(
-      f.provider.publish(null, snapshot, state(), renderReviewComment(state()))
+      f.provider.publish(null, snapshot, state(), renderReviewComment(state(), null))
     ).rejects.toThrow();
     expect(f.canonicalCreates()).toHaveLength(0);
   });
+});
+
+describe('append-only review history', () => {
+  function history() {
+    const rootState = state();
+    const root = { commentId: 42, body: renderReviewComment(rootState), state: rootState };
+    const secondState = {
+      ...state(),
+      revision: 2,
+      completedReviews: 2,
+      operationKey: 'f'.repeat(64),
+    };
+    const second = {
+      commentId: 43,
+      body: renderReviewComment(secondState, root),
+      state: secondState,
+    };
+    const thirdState = { ...state(), revision: 3, completedReviews: 3 };
+    const third = {
+      commentId: 44,
+      body: renderReviewComment(thirdState, second),
+      state: thirdState,
+    };
+    return [root, second, third];
+  }
+  it('loads the unique head independently of ID/order, allowing repeated operation keys', async () => {
+    const f = fixture();
+    const records = history();
+    f.setComments(
+      records.toReversed().map(record => comment(record.body, undefined, record.commentId))
+    );
+    expect(await f.provider.loadState()).toEqual(records[2]);
+  });
+  it.each([
+    'tamper',
+    'deleted root',
+    'deleted middle',
+    'fork',
+    'duplicate revision',
+    'multiple roots',
+    'orphan',
+  ])('rejects %s without selecting a newer comment', async change => {
+    const f = fixture();
+    const [root, second, third] = history();
+    const comments = [root!, second!, third!].map(record =>
+      comment(record.body, undefined, record.commentId)
+    );
+    if (change === 'tamper') {
+      comments[0]!.body = comments[0]!.body.replace('All files reviewed', 'Tampered notes');
+    }
+    if (change === 'deleted root') {
+      comments.shift();
+    }
+    if (change === 'deleted middle') {
+      comments.splice(1, 1);
+    }
+    if (change === 'fork') {
+      comments.push(comment(renderReviewComment(third!.state, second!), undefined, 45));
+    }
+    if (change === 'duplicate revision') {
+      comments.push(comment(renderReviewComment(second!.state, root!), undefined, 45));
+    }
+    if (change === 'multiple roots') {
+      comments.push(
+        comment(
+          renderReviewComment({ ...state(), revision: 4, completedReviews: 4 }),
+          undefined,
+          45
+        )
+      );
+    }
+    if (change === 'orphan') {
+      comments.push(
+        comment(
+          renderReviewComment(
+            { ...state(), revision: 4, completedReviews: 4 },
+            { ...third!, commentId: 999 }
+          ),
+          undefined,
+          45
+        )
+      );
+    }
+    f.setComments(comments);
+    await expect(f.provider.loadState()).rejects.toThrow();
+  });
+  it('migrates a historical in-place root and recovers a timed-out append exactly once', async () => {
+    const f = fixture();
+    const legacyState = { ...state(), revision: 8, completedReviews: 8, nextFindingId: 12 };
+    const legacyBody = renderReviewComment(legacyState);
+    f.setComments([comment(legacyBody)]);
+    await f.initialize();
+    let previous = (await f.provider.loadState())!;
+    const next = { ...legacyState, revision: 9, completedReviews: 9 };
+    const body = renderReviewComment(next, previous);
+    const create = f.issues.createComment.getMockImplementation()!;
+    f.issues.createComment.mockImplementationOnce(async args => {
+      await create(args);
+      throw new Error('timeout after POST');
+    });
+    await f.provider.publish(previous, snapshot, next, body);
+    const head = (await f.provider.loadState())!;
+    expect(head.commentId).not.toBe(previous.commentId);
+    expect(f.comments().find(item => item.id === previous.commentId)?.body).toBe(legacyBody);
+    expect(head.state.nextFindingId).toBe(12);
+    await f.newPlatform().ensureInitialized!(head, async () => null);
+    await expect(f.provider.publish(previous, snapshot, next, body)).rejects.toThrow('changed');
+    expect(f.canonicalCreates()).toHaveLength(1);
+    expect(f.canonicalUpdates()).toHaveLength(0);
+    f.setComments(f.comments().filter(item => item.id !== head.commentId));
+    previous = (await f.provider.loadState())!;
+    await expect(f.newPlatform().ensureInitialized!(previous, async () => null)).rejects.toThrow(
+      'history'
+    );
+  });
+  it('appends revisions 2 and 3 while preserving every preceding canonical body', async () => {
+    const f = fixture();
+    const legacy = renderReviewComment(state());
+    f.setComments([comment(legacy)]);
+    await f.initialize();
+    for (const revision of [2, 3]) {
+      const previous = (await f.provider.loadState())!;
+      await f.provider.ensureInitialized!(previous, async () => null);
+      const next = { ...state(), revision, completedReviews: revision };
+      await f.provider.publish(previous, snapshot, next, renderReviewComment(next, previous));
+      expect(f.comments().find(item => item.id === previous.commentId)?.body).toBe(previous.body);
+      expect((await f.provider.loadState())?.state.revision).toBe(revision);
+    }
+    expect(f.comments().filter(item => item.body.startsWith(MARKER))).toHaveLength(3);
+    expect(f.canonicalUpdates()).toHaveLength(0);
+  });
+  it.each(['legacy', 'wrong parent', 'skipped revision'])(
+    'rejects new publication with %s before any write',
+    async kind => {
+      const f = fixture();
+      await f.initialize();
+      const next =
+        kind === 'skipped revision' ? { ...state(), revision: 2, completedReviews: 2 } : state();
+      const body =
+        kind === 'legacy'
+          ? renderReviewComment(next)
+          : kind === 'wrong parent'
+            ? renderReviewComment(next, history()[0]!)
+            : renderReviewComment(next, null);
+      await expect(f.provider.publish(null, snapshot, next, body)).rejects.toThrow('history');
+      expect(f.canonicalCreates()).toHaveLength(0);
+    }
+  );
 });
 
 describe('GitHub canonical state', () => {
@@ -823,7 +972,7 @@ describe('GitHub canonical state', () => {
       'token'
     );
     expect(previous).toEqual(before);
-    await f.provider.publish(null, pinned, state(), renderReviewComment(state()));
+    await f.provider.publish(null, pinned, state(), renderReviewComment(state(), null));
     expect(f.getRef).toHaveBeenCalledTimes(2);
     expect(f.canonicalCreates()).toHaveLength(1);
   });
@@ -831,7 +980,7 @@ describe('GitHub canonical state', () => {
     'rejects base %s after snapshot before any comment mutation',
     async change => {
       const f = fixture();
-      const body = renderReviewComment(state());
+      const body = renderReviewComment(state(), null);
       f.setComments([comment(body)]);
       const expected = await f.provider.loadState();
       const pinned = await f.provider.snapshot(expected!.state);
@@ -841,7 +990,10 @@ describe('GitHub canonical state', () => {
         // Retargeting must be rejected even when both branches point at the same commit.
         f.pr.base.ref = 'release/stable';
       }
-      await expect(f.provider.publish(expected, pinned, state(), body)).rejects.toThrow('Stale');
+      const next = { ...state(), revision: 2, completedReviews: 2 };
+      await expect(
+        f.provider.publish(expected, pinned, next, renderReviewComment(next, expected))
+      ).rejects.toThrow('Stale');
       expect(f.pr.base.sha).toBe('7'.repeat(40));
       expect(f.getRef).toHaveBeenLastCalledWith({
         owner: 'owner',
@@ -874,7 +1026,7 @@ describe('GitHub canonical state', () => {
     await expect(
       phase === 'snapshot'
         ? f.provider.snapshot(null)
-        : f.provider.publish(null, pinned, state(), renderReviewComment(state()))
+        : f.provider.publish(null, pinned, state(), renderReviewComment(state(), null))
     ).rejects.toThrow('404');
     expect(f.prepare).not.toHaveBeenCalled();
     expect(f.issues.createComment).not.toHaveBeenCalled();
@@ -896,7 +1048,7 @@ describe('GitHub canonical state', () => {
     f.getRef.mockResolvedValue({ data: { object: object as typeof f.refObject } });
     await expect(f.provider.snapshot(null)).rejects.toThrow('Invalid live base ref commit');
     await expect(
-      f.provider.publish(null, snapshot, state(), renderReviewComment(state()))
+      f.provider.publish(null, snapshot, state(), renderReviewComment(state(), null))
     ).rejects.toThrow('Invalid live base ref commit');
     expect(f.prepare).not.toHaveBeenCalled();
     expect(f.issues.createComment).not.toHaveBeenCalled();
@@ -932,7 +1084,7 @@ describe('GitHub canonical state', () => {
     f.pr.base.ref = ref;
     await expect(f.provider.snapshot(null)).rejects.toThrow('Invalid live base ref');
     await expect(
-      f.provider.publish(null, snapshot, state(), renderReviewComment(state()))
+      f.provider.publish(null, snapshot, state(), renderReviewComment(state(), null))
     ).rejects.toThrow('Invalid live base ref');
     expect(f.getRef).not.toHaveBeenCalled();
     expect(f.prepare).not.toHaveBeenCalled();
@@ -943,7 +1095,7 @@ describe('GitHub canonical state', () => {
     const f = fixture();
     f.setComments([
       comment('The bot wrote:\n> <!-- pi-stateful-review:v1 -->', 'user'),
-      comment(renderReviewComment(state())),
+      comment(renderReviewComment(state(), null)),
     ]);
     expect((await f.provider.loadState())?.commentId).toBe(42);
   });
@@ -951,14 +1103,14 @@ describe('GitHub canonical state', () => {
     const f = fixture();
     f.setComments([
       ...Array.from({ length: 601 }, (_, i) => comment('ordinary', 'user', i)),
-      comment(renderReviewComment(state())),
+      comment(renderReviewComment(state(), null)),
     ]);
     expect((await f.provider.loadState())?.state.operationKey).toBe(state().operationKey);
     expect(f.issues.listComments).toHaveBeenCalledTimes(7);
   });
   it('ignores wrong authors but rejects genuine duplicates, malformed records and association mismatches', async () => {
     const f = fixture();
-    const body = renderReviewComment(state());
+    const body = renderReviewComment(state(), null);
     f.setComments([comment(body, 'attacker')]);
     expect(await f.provider.loadState()).toBeNull();
     expect(f.warning).toHaveBeenCalledOnce();
@@ -1006,23 +1158,23 @@ describe('GitHub canonical state', () => {
         f.pr.head.repo.full_name = 'fork/repo';
       }
       await expect(
-        f.provider.publish(null, snapshot, state(), renderReviewComment(state()))
+        f.provider.publish(null, snapshot, state(), renderReviewComment(state(), null))
       ).rejects.toThrow();
       expect(f.issues.createComment).not.toHaveBeenCalled();
     }
   );
   it('rejects changed expected canonical body', async () => {
     const f = fixture();
-    f.setComments([comment(renderReviewComment(state()))]);
+    f.setComments([comment(renderReviewComment(state(), null))]);
     await expect(
-      f.provider.publish(null, snapshot, state(), renderReviewComment(state()))
+      f.provider.publish(null, snapshot, state(), renderReviewComment(state(), null))
     ).rejects.toThrow('changed');
   });
   it('rejects PAT publication before creating a misleading user-owned canonical record', async () => {
     const f = fixture();
     f.installationRepos.mockRejectedValue(new Error('403: installation access token required'));
     await expect(
-      f.provider.publish(null, snapshot, state(), renderReviewComment(state()))
+      f.provider.publish(null, snapshot, state(), renderReviewComment(state(), null))
     ).rejects.toThrow('GITHUB_TOKEN');
     expect(f.issues.createComment).not.toHaveBeenCalled();
   });
@@ -1030,7 +1182,7 @@ describe('GitHub canonical state', () => {
     const f = fixture();
     f.auth.mockResolvedValue({ token: 'opaque-action-token', tokenType: 'oauth' });
     await f.initialize();
-    await f.provider.publish(null, snapshot, state(), renderReviewComment(state()));
+    await f.provider.publish(null, snapshot, state(), renderReviewComment(state(), null));
     expect(f.installationRepos).toHaveBeenCalledWith({ per_page: 1 });
     expect(f.canonicalCreates()).toHaveLength(1);
   });
@@ -1048,21 +1200,21 @@ describe('GitHub canonical state', () => {
       return { data: comment(body) };
     });
     await expect(
-      f.provider.publish(null, snapshot, state(), renderReviewComment(state()))
+      f.provider.publish(null, snapshot, state(), renderReviewComment(state(), null))
     ).rejects.toThrow('could not be verified');
     expect(f.canonicalCreates()).toHaveLength(1);
   });
   it('creates once and reads back', async () => {
     const f = fixture();
     await f.initialize();
-    await f.provider.publish(null, snapshot, state(), renderReviewComment(state()));
+    await f.provider.publish(null, snapshot, state(), renderReviewComment(state(), null));
     expect(f.canonicalCreates()).toHaveLength(1);
-    expect((await f.provider.loadState())?.body).toBe(renderReviewComment(state()));
+    expect((await f.provider.loadState())?.body).toBe(renderReviewComment(state(), null));
     expect(f.comments()).toHaveLength(2);
   });
   it('reconciles ambiguous successful creates without retry', async () => {
     const f = fixture();
-    const body = renderReviewComment(state());
+    const body = renderReviewComment(state(), null);
     await f.initialize();
     f.issues.createComment.mockImplementationOnce(async () => {
       f.comments().push(comment(body));
@@ -1072,9 +1224,9 @@ describe('GitHub canonical state', () => {
     expect(f.canonicalCreates()).toHaveLength(1);
     await f.newPlatform().ensureInitialized!(await f.provider.loadState(), async () => null);
   });
-  it('never replaces failed updates or retries failed creates', async () => {
+  it('never edits history or retries failed creates', async () => {
     const f = fixture();
-    const body = renderReviewComment(state());
+    const body = renderReviewComment(state(), null);
     f.setComments([comment(body)]);
     const expected = await f.provider.loadState();
     const next = state();
@@ -1082,18 +1234,20 @@ describe('GitHub canonical state', () => {
     next.completedReviews++;
     next.operationKey = 'f'.repeat(64);
     await f.initialize();
-    const update = f.issues.updateComment.getMockImplementation()!;
-    f.issues.updateComment.mockImplementation(async args => {
-      if (args.body.startsWith(MARKER)) {
-        throw new Error('denied');
-      }
-      return update(args);
-    });
+    f.issues.createComment.mockRejectedValueOnce(new Error('denied'));
     await expect(
-      f.provider.publish(expected, snapshot, next, renderReviewComment(next))
+      f.provider.publish(expected, snapshot, next, renderReviewComment(next, expected))
     ).rejects.toThrow('denied');
-    expect(f.canonicalCreates()).toHaveLength(0);
-    expect(f.canonicalUpdates()).toHaveLength(1);
+    expect(f.canonicalCreates()).toHaveLength(1);
+    expect(f.canonicalUpdates()).toHaveLength(0);
+    expect(await f.provider.loadState()).toEqual(expected);
+    await expect(f.newPlatform().ensureInitialized!(expected, async () => null)).rejects.toThrow(
+      'history'
+    );
+    await expect(
+      f.provider.publish(expected, snapshot, next, renderReviewComment(next, expected))
+    ).rejects.toThrow('history');
+    expect(f.canonicalCreates()).toHaveLength(1);
     const fresh = fixture();
     await fresh.initialize();
     fresh.issues.createComment.mockRejectedValue(new Error('timeout'));

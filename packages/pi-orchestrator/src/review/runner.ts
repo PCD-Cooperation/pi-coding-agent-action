@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { getActionVersion } from '../version';
 import {
   advanceReview,
+  requiresHumanReview,
   renderReviewComment,
   renderIncompleteReview,
   reviewHash,
@@ -56,10 +57,7 @@ export async function prepareReview(
   if (provider.type !== 'github' || !provider.statefulReview || config.publishComment === false) {
     throw new Error('Stateful review requires GitHub and canonical comment publication.');
   }
-  const maxRounds = config.reviewMaxRounds ?? 3;
-  if (!Number.isSafeInteger(maxRounds) || maxRounds < 1) {
-    throw new Error('review_max_rounds must be a positive safe integer.');
-  }
+  const maxRounds = 0;
   const coverageOptions = config.reviewCoverage
     ? reviewCoverageOptions(config.reviewCoverageOptions)
     : undefined;
@@ -181,7 +179,7 @@ export async function prepareReview(
     reason,
   });
   let skip: PreparedReview['skip'] = null;
-  if (previous?.state.needsHuman && control !== 'resume') {
+  if (requiresHumanReview(previous?.state ?? null) && control !== 'resume') {
     skip = 'needs_human';
   } else if (
     previous &&
@@ -250,7 +248,7 @@ export function validateReviewSubmission(prepared: PreparedReview, result: Revie
     renderIncompleteReview(prepared.snapshot, candidate, prepared.previous?.state ?? null);
     return;
   }
-  renderReviewComment(buildReviewState(prepared, candidate));
+  renderReviewComment(buildReviewState(prepared, candidate), prepared.previous);
 }
 
 export function buildReviewState(prepared: PreparedReview, result: ReviewSubmission): ReviewState {
@@ -291,7 +289,7 @@ export async function commitReview(
     await prepared.coverageGate(result.review);
   }
   const state = buildReviewState(prepared, result.review);
-  const body = renderReviewComment(state);
+  const body = renderReviewComment(state, prepared.previous);
   if (!provider.statefulReview) {
     throw new Error('Stateful review publisher unavailable.');
   }

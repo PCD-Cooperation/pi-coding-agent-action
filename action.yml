@@ -60,7 +60,7 @@ inputs:
     default: 'false'
 
   review_coverage:
-    description: 'Opt-in coverage review in one invocation with bounded parallel workers. Requires stateful_review=true and publish_comment=true. Incomplete work never advances the checkpoint; there is no automatic continuation. See docs/contracts/review-coverage-v2.md.'
+    description: 'Opt-in coverage review in one invocation with bounded parallel workers. Requires stateful_review=true and publish_comment=true. Incomplete work never advances the checkpoint; there is no automatic continuation. See docs/contracts/review-coverage-v3.md.'
     required: false
     default: 'false'
 
@@ -75,9 +75,9 @@ inputs:
     default: '96'
 
   review_max_rounds:
-    description: 'Maximum completed actionable review/fix rounds before human reassessment. Clean reviews reset the active episode, not finding history.'
+    description: 'Deprecated and ignored. Actionable review/fix rounds are unlimited; uncertain material origin still requires human reassessment.'
     required: false
-    default: '3'
+    default: '0'
 
   review_control:
     description: 'Manual stateful review control: none, bootstrap, resume, or full. Non-none controls require a collaborator with write access and a reason.'

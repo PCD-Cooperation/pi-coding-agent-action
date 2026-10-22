@@ -36,7 +36,7 @@ Inputs:
 | `review_coverage`         | `false`  | Host inventory, durable work and completion gate; requires stateful review |
 | `review_work_concurrency` | `3`      | Concurrent coverage workers, 1–3                                           |
 | `review_work_max_units`   | `96`     | Total required coverage units, 1–96                                        |
-| `review_max_rounds`       | `3`      | Actionable fix revisions per episode before human reassessment             |
+| `review_max_rounds`       | `0`      | Deprecated: accepted and ignored; no finite review-round cap                |
 | `review_control`          | `none`   | `none`, `bootstrap`, `resume`, or `full`                                   |
 | `review_control_reason`   | empty    | Required for every non-`none` control                                      |
 | `pr_number`               | event PR | Set explicitly for manual dispatch                                         |
@@ -59,10 +59,11 @@ cannot replace an existing ledger or reset tracked published history. Invalid st
 requires deliberate operator recovery, not an automatic reset.
 
 `full` requests whole-PR discovery but does not unpause escalation or erase findings.
-`resume` records human reassessment and starts another bounded episode. It never
-marks a finding fixed or accepts risk. Do not use repeated resumes to automate
-around the limit. Only the most recent intervention is retained in the current
-checkpoint; use external run artifacts/history if a full intervention audit is needed.
+`resume` records authorized human reassessment of material uncertainty. It never
+marks a finding fixed or accepts risk. There is no finite review-round cap.
+Legacy cap-only `needsHuman` pauses release on the next ordinary event without
+resetting counters or F-IDs; uncertain material origin still requires authorized
+resume. Each invocation retains all existing resource limits.
 
 ## Initialization lifecycle
 
@@ -76,10 +77,11 @@ including an initial bootstrap reason even when that attempt never completes.
 - `pending`: initialization was authorized, but no successful checkpoint exists.
   Snapshot/model failures and incomplete results leave this phase intact. Later
   ordinary `none` runs retry automatically, even on another readiness event or a
-  rerun; no successful cursor, finding ID or fix-round budget is advanced.
+  rerun; no successful cursor, finding ID or historical round counter is advanced.
 - `publishing`: a validated candidate is about to be written. The receipt binds its
-  body hash, revision and operation key, plus any prior checkpoint. Exact canonical
-  readback can finish a seal interrupted after the write. A known rejected write
+  body hash, revision, operation key and parent descriptor, plus any prior checkpoint.
+  The candidate's newly created comment ID may differ from the prior checkpoint ID.
+  Exact canonical readback can finish a seal interrupted after the write. A known rejected write
   can restore the prior phase; an ambiguous write is not permission to start over.
 - `committed`: the receipt binds the successful canonical comment and its hash,
   revision and operation key. Existing v1 ledgers are adopted without changing their
@@ -104,11 +106,31 @@ when the actual review fails or is incomplete; no result is forced complete.
 
 Lifecycle comments and tracking labels are inert after rolling back to the prior
 reviewer. Do not delete them as part of rollback. Coordinate version changes so an
-old writer cannot update a checkpoint behind a receipt-aware writer.
+old writer cannot update a checkpoint behind a receipt-aware writer. New writes keep
+this marker/label but use lifecycle payload version 2. Strict version-1 readers
+therefore refuse even a single new canonical root. New readers accept both payload
+versions; interrupted version-1 in-place publication recovers only its exact legacy
+candidate at the old comment ID. Version 2 requires the linked append candidate.
+Changing the version digit adds no bytes to the publication capacity reserve.
+
+## Append-only canonical history
+
+Each new completed review creates a NEW full findings comment linked to the
+previous checkpoint; older canonical bodies are immutable. Canonical schema 1
+is unchanged. The encoded `pi-stateful-review-parent:v1` marker appears before
+the state payload and carries a parent descriptor
+`{commentId, bodyHash, revision, operationKey}`, or null for a root. Validate the
+entire chain and select exactly one head, never the newest timestamp. Missing,
+deleted, tampered or forked history fails closed. One valid legacy edited canonical
+comment may root migration at its current revision; append the next review without
+rewriting that body or resetting counters/F-IDs. Lifecycle and work journals remain
+mutable in place with the same IDs and witnesses, distinct from findings history.
+Unchanged inputs and completed-operation retries post nothing; pending/incomplete
+work never creates a successful snapshot.
 
 ## Review flow
 
-1. Read the dedicated bot-owned comment, validating schema, identity and ledger;
+1. Validate the bot-owned canonical history and its unique chain head, schema, identity and ledger;
    verify/adopt its lifecycle receipt or durably record authorized pending initialization.
 2. Capture head `H`, actual target-ref tip `B`, merge-base `M`, PR intent and
    configuration. Resolve `refs/heads/<baseRef>` through GitHub; an older PR's API
@@ -127,17 +149,18 @@ old writer cannot update a checkpoint behind a receipt-aware writer.
    deliberately not a triple-dot comparison after a force-push.
 4. Reconcile every open finding, then inspect changes and affected dependencies.
    A changed merge-base/base ref or unavailable old head causes an explicit full
-   fallback, preserving the ledger and active budget. Reviewer configuration
+   fallback, preserving the ledger and historical counters. Reviewer configuration
    changes and the `full` control also trigger full discovery.
 5. Submit one schema-validated `submit_review_result` call. Complete submissions
    receive host-assigned IDs, transition validation, and current head/actual
-   target-ref/intent checks before one canonical comment update. An honest
+   target-ref/intent checks before appending one new full findings comment. An honest
    incomplete submission is a valid final report, not a request to relabel its
    coverage complete: it fails the run, preserves its reason/candidate evidence in
    outputs and the job summary, and never advances or overwrites canonical state.
 6. Verify the written checkpoint and seal its lifecycle receipt. A publication error
    is never a reason to create replacement state. Ambiguous write timeouts are
-   reconciled by exact operation key/body and receipt intent.
+   reconciled by exact body hash/revision/operation key, parent and receipt intent,
+   preventing duplicate posts on retries.
 
 Snapshot extraction rejects symlinks/submodules, unsafe paths and case-colliding
 names. It materializes raw, non-executable blobs without attributes/filters/hooks.
@@ -212,7 +235,7 @@ ambiguous writes fail closed. Preserve manifests, blobs and labels during rollba
 A failed invocation can recover reviewed units or a ready synthesis only for the
 exact H/B/M/P, intent, configuration, deterministic plan and canonical-predecessor
 fingerprint. Changed inputs invalidate work reuse, never canonical findings,
-fix-round budgets or pause state. Within that fingerprint, cumulative attempt
+historical counters or material-uncertainty pause state. Within that fingerprint, cumulative attempt
 counts never reset; each retry has a bounded new invocation allowance. Identically
 blocked scopes are not automatically repeated: change the material input/policy or
 use authorized full reassessment. Durable recovery is failure handling, not a
@@ -236,9 +259,10 @@ the configured budget. This proves deterministic admission, not live model quali
 latency or successful semantic completion. Validate those in a coordinated pilot
 before rollout; do not merge/deploy merely because a fixture fits.
 
-The immutable consumer interface is [coverage contract v2](contracts/review-coverage-v2.md).
-[Coverage contract v1](contracts/review-coverage-v1.md) remains the legacy contract.
-V2 adds asynchronous preflight that is awaited before result capture, atomic
+The immutable consumer interface is [coverage contract v3](contracts/review-coverage-v3.md).
+[Coverage contract v1](contracts/review-coverage-v1.md) and
+[coverage contract v2](contracts/review-coverage-v2.md) remain immutable legacy contracts.
+V3 adds append-only canonical history and removes the finite round cap. V2 added asynchronous preflight that is awaited before result capture, atomic
 follow-up admission/capacity checks, and optional native digest recipes. A recipe
 uses `paths=[manifestPath]`, a JSON `pointer`, `normalization` (`sha256-raw-v1` or
 `sha256-utf8-lf-v1`) and `selection` (`changed` or `all`). `changed` selects against
@@ -250,7 +274,7 @@ CRLF and lone CR to LF; raw hashing preserves exact binary bytes.
 
 The work envelope/markers stay v1 and still decode legacy follow-ups. The
 `coverage-work-v2` fingerprint invalidates old work reuse, never canonical findings
-or lifecycle/pause/actionable-round state. Old rollback source rejects new recipes
+or lifecycle/material-uncertainty pause/round counters. Old rollback source rejects new recipes
 rather than silently discarding them; preserve all durable witnesses.
 
 ## Approved dependency evidence
@@ -260,7 +284,7 @@ source of this action: only `PCD-Cooperation/pi-coding-agent-action` and upstrea
 `shaftoe/pi-coding-agent-action`. The fixed required files are `action.yml`, the
 orchestrator, the action's Git adapter and GitHub comment publisher. The fixed
 versioned stateful runner, renderer, GitHub state provider, lifecycle implementation
-and the declared coverage contract are also staged when present; only a nonredirected 404 denotes an older version without those files. The contract slot selects v2 only when the pinned action's coverage input description declares its fixed v2 contract path; otherwise it selects v1. No tenth file or arbitrary fetched path is admitted.
+and the declared coverage contract are also staged when present; only a nonredirected 404 denotes an older version without those files. The same ninth contract slot selects v3 when the pinned action's coverage input description declares its fixed v3 contract path, otherwise v2 when declared, else v1. No tenth file or arbitrary fetched path is admitted.
 Their absence is disclosed, not evidence that an unknown contract is safe.
 This source-controlled allowlist is maintainer policy, not a PR or model input.
 PR-head, merge-base and actual-target references are considered for changed workflows. Mutable tags, arbitrary
@@ -275,7 +299,7 @@ package is declared as a core runtime dependency for this parsing boundary.
 The fetcher uses only the fixed HTTPS raw-GitHub host, no authentication, cookies,
 or credential forwarding and rejects redirects. Limits remain four references,
 64 KiB per file, 256 KiB total and 45 seconds overall (15 seconds per request),
-with at most nine fixed files per reference (policy `approved-action-pins-v6`). Text is staged as non-executable evidence in temporary
+with at most nine fixed files per reference (policy `approved-action-pins-v7`). Text is staged as non-executable evidence in temporary
 files; it is never imported, installed or executed. Missing or omitted approved
 context is explicit in the manifest and prevents a complete result. Other material
 external contracts still require an honest incomplete report if they cannot be
@@ -337,11 +361,11 @@ Only completed, successfully published reviews count. Replaying the same input
 snapshot/configuration does not run the model or advance state. Rechecking the same
 fix revision while base/configuration changes does not consume another actionable
 round. Moving from A to B and force-pushing back to A is a new fix attempt, not an
-unchanged-checkpoint retry; it consumes a round so toggling old heads cannot evade
-the bound. Clean reviews end the active episode without deleting total counts/history.
-Three actionable fix attempts with unresolved material regressions pause automatic
-model runs until an authorized human resumes. Failure/incomplete coverage does not
-advance the cursor or constitute a clean review.
+unchanged-checkpoint retry; counters remain historical accounting, not a finite cap.
+Clean reviews end the active episode without deleting total counts/history.
+Unresolved actionable findings alone never trigger a round-limit pause. Material
+uncertain origin still requires authorized human resume. Failure/incomplete coverage
+does not advance the cursor or constitute a clean review.
 
 Outputs `review_outcome` (`reviewed`, `unchanged`, `needs_human`, `incomplete`) and
 `review_revision` describe processing/checkpoint state, not merge authorization.

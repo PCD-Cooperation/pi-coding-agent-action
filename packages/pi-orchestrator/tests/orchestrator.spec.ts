@@ -676,10 +676,87 @@ describe('ActionOrchestrator', () => {
       expect(capability.publish).not.toHaveBeenCalled();
     });
 
-    test('human escalation is sticky, including full-review requests', async () => {
+    function actionableReview(origin: 'uncertain' | 'pr_introduced' = 'pr_introduced') {
+      mockPiAgent.run = vi.fn(async () => ({
+        result: '',
+        sessionStats: undefined,
+        error: undefined,
+        review: {
+          coverage: 'complete' as const,
+          coverageNotes: 'Inspected pinned paths.',
+          findings: [
+            {
+              id: record?.state.findings[0]?.id ?? null,
+              rootCause: 'Retry duplicates payment',
+              origin,
+              lifecycle: 'open' as const,
+              material: true,
+              location: 'service.py:1',
+              evidence: 'Retry creates duplicate.',
+              originEvidence: 'Baseline kept a stable key.',
+              dispositionReason: '',
+            },
+          ],
+        },
+      }));
+    }
+
+    test('deprecated finite round settings cannot pause six actionable reviews', async () => {
+      actionableReview();
+      for (let round = 1; round <= 6; round++) {
+        capability.snapshot = vi.fn(async () => ({
+          ...snapshot,
+          headSha: String(round).repeat(40),
+        }));
+        await createOrchestrator({
+          reviewControl: round === 1 ? 'bootstrap' : 'none',
+          reviewMaxRounds: 1,
+        }).execute();
+        expect(record!.state.needsHuman).toBe(false);
+        expect(record!.state.actionableRounds).toBe(round);
+      }
+      expect(record!.state).toMatchObject({ completedReviews: 6, revision: 6, nextFindingId: 2 });
+      expect(record!.state.findings[0]).toMatchObject({
+        id: 'F1',
+        firstReportedHead: '1'.repeat(40),
+      });
+    });
+
+    test('ordinary events release a legacy cap pause with one full reassessment', async () => {
+      actionableReview();
       await createOrchestrator().execute();
-      record!.state.needsHuman = true;
+      record!.state = {
+        ...record!.state,
+        revision: 3,
+        completedReviews: 3,
+        actionableRounds: 3,
+        needsHuman: true,
+        configurationHash: reviewHash('legacy finite cap'),
+      };
       record!.body = renderReviewComment(record!.state);
+      const findings = structuredClone(record!.state.findings);
+      const authorizationCalls = vi.mocked(capability.authorizeControl).mock.calls.length;
+      await createOrchestrator({ reviewControl: 'none', reviewMaxRounds: 3 }).execute();
+      expect(record!.state).toMatchObject({
+        revision: 4,
+        completedReviews: 4,
+        actionableRounds: 3,
+        needsHuman: false,
+        nextFindingId: 2,
+        reviewMode: 'full',
+        fallbackReason: 'Reviewer configuration changed.',
+      });
+      expect(record!.state.findings).toEqual(findings);
+      expect(vi.mocked(capability.authorizeControl).mock.calls).toHaveLength(authorizationCalls);
+      vi.mocked(mockPiAgent.run).mockClear();
+      await createOrchestrator({ reviewControl: 'none', reviewMaxRounds: 1 }).execute();
+      expect(mockPiAgent.run).not.toHaveBeenCalled();
+      expect(record!.state.revision).toBe(4);
+    });
+
+    test('human escalation is sticky, including full-review requests', async () => {
+      actionableReview('uncertain');
+      await createOrchestrator().execute();
       vi.mocked(mockPiAgent.run).mockClear();
       await createOrchestrator({
         reviewControl: 'full',
@@ -688,6 +765,40 @@ describe('ActionOrchestrator', () => {
       expect(mockPiAgent.run).not.toHaveBeenCalled();
       expect(record!.state.completedReviews).toBe(1);
       expect(mockOutputSink.setOutput).toHaveBeenCalledWith('review_outcome', 'needs_human');
+      await createOrchestrator({ reviewControl: 'none' }).execute();
+      expect(mockPiAgent.run).not.toHaveBeenCalled();
+    });
+
+    test('resume must be authorized and preserves finding identity and ledger counters', async () => {
+      actionableReview('uncertain');
+      await createOrchestrator().execute();
+      const before = structuredClone(record);
+      vi.mocked(capability.authorizeControl).mockRejectedValueOnce(new Error('Not authorized'));
+      await expect(createOrchestrator({ reviewControl: 'resume' }).execute()).rejects.toThrow(
+        'Not authorized'
+      );
+      expect(record).toEqual(before);
+      actionableReview();
+      await createOrchestrator({
+        reviewControl: 'resume',
+        reviewControlReason: 'Confirmed baseline attribution.',
+      }).execute();
+      expect(record!.state).toMatchObject({
+        revision: 2,
+        completedReviews: 2,
+        actionableRounds: 1,
+        nextFindingId: 2,
+        needsHuman: false,
+        intervention: {
+          actor: 'maintainer',
+          control: 'resume',
+          reason: 'Confirmed baseline attribution.',
+        },
+      });
+      expect(record!.state.findings[0]).toMatchObject({
+        id: 'F1',
+        firstReportedHead: snapshot.headSha,
+      });
     });
   });
 

@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
-import { prepareReview } from '../src/review/runner';
+import {
+  buildReviewState,
+  commitReview,
+  prepareReview,
+  validateReviewSubmission,
+} from '../src/review/runner';
+import { renderReviewComment } from '../src/review/state';
+import { reviewHistoryParent, reviewParentDescriptor } from '../src/review/history';
 import type { PlatformProvider } from '../src/platform';
 import type { PiConfig } from '../src/types';
 import type { ReviewSnapshot, ReviewStateRecord } from '../src/review/types';
@@ -20,7 +27,7 @@ function fixture() {
     baseSha: 'b'.repeat(40),
     mergeBaseSha: 'c'.repeat(40),
     baseRef: 'main',
-    intentHash: 'intent',
+    intentHash: 'd'.repeat(64),
     mode: 'full',
     fallbackReason: null,
     headPath: '/head',
@@ -49,6 +56,87 @@ function fixture() {
   const config = { cwd: '/nonexistent-review-policy', reviewControl: 'none' } as PiConfig;
   return { platform, provider, context, config };
 }
+
+describe('review publication rendering', () => {
+  const submission = { coverage: 'complete' as const, coverageNotes: 'Inspected.', findings: [] };
+
+  it.each([undefined, 0, 1, 3, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'normalizes deprecated API round setting %s to the unlimited configuration',
+    async reviewMaxRounds => {
+      const f = fixture();
+      const baseline = await prepareReview(f.provider, f.config, 'Review');
+      const prepared = await prepareReview(
+        f.provider,
+        {
+          ...f.config,
+          ...(reviewMaxRounds === undefined ? {} : { reviewMaxRounds }),
+        },
+        'Review'
+      );
+      expect(prepared.maxRounds).toBe(0);
+      expect(prepared.configurationHash).toBe(baseline.configurationHash);
+    }
+  );
+
+  it('publishes explicit root and linked child metadata without changing legacy rendering', async () => {
+    const f = fixture();
+    const prepared = await prepareReview(f.provider, f.config, 'Review');
+    validateReviewSubmission(prepared, submission);
+    const result = { result: '', review: submission, sessionStats: undefined, error: undefined };
+    const root = await commitReview(f.provider, prepared, result);
+    expect(reviewHistoryParent(root.body)).toBeNull();
+    expect(reviewHistoryParent(renderReviewComment(root.state))).toBeUndefined();
+    const previous = { commentId: 42, ...root };
+    f.platform.loadState.mockResolvedValue(previous);
+    const childPrepared = await prepareReview(f.provider, f.config, 'Review');
+    validateReviewSubmission(childPrepared, submission);
+    const child = await commitReview(f.provider, childPrepared, result);
+    expect(reviewHistoryParent(child.body)).toEqual(reviewParentDescriptor(previous));
+    expect(f.platform.publish).toHaveBeenLastCalledWith(
+      previous,
+      childPrepared.snapshot,
+      child.state,
+      child.body
+    );
+  });
+
+  it.each([false, true])(
+    'checks the final linked comment budget before submission and publication (child=%s)',
+    async child => {
+      const f = fixture();
+      const prepared = await prepareReview(f.provider, f.config, 'Review');
+      if (child) {
+        const state = buildReviewState(prepared, submission);
+        prepared.previous = { commentId: 42, state, body: renderReviewComment(state) };
+      }
+      let low = 0;
+      let high = 60_000;
+      while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        try {
+          renderReviewComment(
+            buildReviewState(prepared, { ...submission, coverageNotes: 'x'.repeat(middle) })
+          );
+          low = middle;
+        } catch {
+          high = middle - 1;
+        }
+      }
+      const nearLimit = { ...submission, coverageNotes: 'x'.repeat(low) };
+      expect(() => renderReviewComment(buildReviewState(prepared, nearLimit))).not.toThrow();
+      expect(() => validateReviewSubmission(prepared, nearLimit)).toThrow('comment budget');
+      await expect(
+        commitReview(f.provider, prepared, {
+          result: '',
+          review: nearLimit,
+          sessionStats: undefined,
+          error: undefined,
+        })
+      ).rejects.toThrow('comment budget');
+      expect(f.platform.publish).not.toHaveBeenCalled();
+    }
+  );
+});
 
 describe('static review coverage guidance', () => {
   it('separates deployment prerequisites without waiving security or incomplete evidence', async () => {
@@ -115,7 +203,7 @@ describe('automatic first draft readiness initialization', () => {
     expect(f.platform.canInitializeFromDraft).not.toHaveBeenCalled();
     expect(f.platform.snapshot).not.toHaveBeenCalled();
   });
-  it('preserves a paused existing checkpoint without consulting readiness proof', async () => {
+  it('releases a legacy cap-only checkpoint without consulting readiness proof', async () => {
     const f = fixture();
     const state = {
       schemaVersion: 1,
@@ -137,7 +225,7 @@ describe('automatic first draft readiness initialization', () => {
     f.platform.loadState.mockResolvedValue(record);
     const result = await prepareReview(f.provider, f.config, 'Review');
     expect(result.previous).toBe(record);
-    expect(result.skip).toBe('needs_human');
+    expect(result.skip).toBeNull();
     expect(f.platform.canInitializeFromDraft).not.toHaveBeenCalled();
     expect(f.platform.snapshot).toHaveBeenLastCalledWith(record.state);
     expect(record.state.revision).toBe(7);

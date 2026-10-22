@@ -43,6 +43,9 @@ export {
   reviewHash,
 } from './review/state';
 
+export { reviewHistoryParent, reviewParentDescriptor } from './review/history';
+export type { ReviewHistoryParent } from './review/history';
+
 // Core business logic
 export { ActionOrchestrator, buildSessionSuccessBody, buildSessionErrorBody } from './orchestrator';
 
