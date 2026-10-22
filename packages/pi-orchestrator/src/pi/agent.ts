@@ -280,7 +280,12 @@ export class Agent {
         this.config.reviewWorkUnit,
         this.config.reviewUnitValidator,
         this.config.reviewToolBudget,
-        reportReadBudget
+        reportReadBudget,
+        diagnostic => {
+          this.logger.warning(
+            `Coverage receipt_rejected code=${diagnostic.code}: ${diagnostic.message}`
+          );
+        }
       );
       resourceLoaderOptions.extensionFactories.push(this.reviewUnitCapture.factory);
     } else if (this.config.reviewCoverageSynthesis) {

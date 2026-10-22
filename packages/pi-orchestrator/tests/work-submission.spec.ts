@@ -15,6 +15,8 @@ import {
   createReviewUnitCapture,
   parseReviewFollowUps,
   parseReviewUnitResult,
+  parseReviewUnitReceipt,
+  reviewSpanReferences,
 } from '../src/review/work-submission';
 import type { ReviewUnitResult, ReviewWorkUnit } from '../src/review/work-types';
 
@@ -67,6 +69,16 @@ const result = (): ReviewUnitResult => ({
     },
   ],
 });
+const receipt = () => {
+  const input = result();
+  return {
+    status: input.status,
+    assessment: input.assessment,
+    limitations: input.limitations,
+    findings: input.findings,
+    followUps: input.followUps,
+  };
+};
 const followUps = () => [{ paths: ['src/query.ts'], question: 'Check caller isolation.' }];
 const full = () => ({ coverage: 'complete', coverageNotes: '', findings: [] });
 
@@ -291,7 +303,7 @@ describe('async admission', () => {
             ? 'submit_review_result'
             : 'request_review_followup';
       const value =
-        role === 'worker' ? result() : role === 'review' ? full() : { requests: followUps() };
+        role === 'worker' ? receipt() : role === 'review' ? full() : { requests: followUps() };
       const competitor =
         role === 'worker'
           ? endpoint
@@ -336,7 +348,7 @@ describe('async admission', () => {
             ? 'submit_review_result'
             : 'request_review_followup';
       const value =
-        role === 'worker' ? result() : role === 'review' ? full() : { requests: followUps() };
+        role === 'worker' ? receipt() : role === 'review' ? full() : { requests: followUps() };
       for (const context of [false, true]) {
         const controller = new AbortController();
         const pending = execute(
@@ -380,6 +392,169 @@ describe('async admission', () => {
   });
 });
 
+describe('host-owned worker receipts', () => {
+  const assigned = (): ReviewWorkUnit => ({
+    ...unit,
+    id: 'unit-sha256-host-owned',
+    findingIds: ['F1', 'F2'],
+    spans: Array.from({ length: 12 }, (_, index) => ({
+      ...unit.spans[0]!,
+      id: `sha256-${index}-${'a'.repeat(64)}`,
+    })),
+  });
+  const reviewed = () => ({
+    ...receipt(),
+    findings: ['F1', 'F2'].map(id => ({ ...result().findings[0]!, id })),
+  });
+
+  test('reviewed acknowledges twelve assigned spans without model host IDs', async () => {
+    const scope = assigned();
+    const capture = createReviewUnitCapture(scope);
+    const { execute, tools } = await harness(capture.factory);
+    expect(tools.get('submit_review_unit_result')!.parameters).toMatchObject({ type: 'object' });
+    expect(Check(tools.get('submit_review_unit_result')!.parameters, reviewed())).toBe(true);
+    expect(reviewSpanReferences(scope)).toEqual(
+      scope.spans.map((span, index) => ({ ref: `S${index + 1}`, spanId: span.id }))
+    );
+    await execute('submit_review_unit_result', reviewed());
+    expect(capture.getResult()).toEqual({
+      ...reviewed(),
+      unitId: scope.id,
+      coveredSpanIds: scope.spans.map(span => span.id),
+      reconciledFindingIds: ['F1', 'F2'],
+    });
+    expect(parseReviewUnitResult(capture.getResult(), scope)).toEqual(capture.getResult());
+    expect(() => parseReviewUnitResult(reviewed(), scope)).toThrow();
+    expect(() => parseReviewUnitReceipt(capture.getResult(), scope)).toThrow();
+  });
+
+  test('invalid refs and duplicate refs reject safely, then partial S1 maps without promotion or union', async () => {
+    const scope = assigned();
+    const rejections: { code: string; message: string }[] = [];
+    const capture = createReviewUnitCapture(scope, undefined, undefined, undefined, error =>
+      rejections.push(error)
+    );
+    const { execute } = await harness(capture.factory);
+    const partial = {
+      ...reviewed(),
+      status: 'partial',
+      limitations: ['Only inspected first span.'],
+      coveredSpans: ['S1'],
+      findings: [],
+    };
+    for (const refs of [['S13'], ['S1', 'S1'], ['secret source text']]) {
+      await expect(
+        execute('submit_review_unit_result', { ...partial, coveredSpans: refs })
+      ).rejects.toThrow();
+      expect(capture.getResult()).toBeUndefined();
+    }
+    expect(rejections[0]!.message).toContain('S13');
+    expect(JSON.stringify(rejections)).not.toContain('secret source text');
+    await execute('submit_review_unit_result', partial);
+    expect(capture.getResult()).toMatchObject({
+      status: 'partial',
+      coveredSpanIds: [scope.spans[0]!.id],
+      reconciledFindingIds: [],
+      findings: [],
+    });
+    capture.reset();
+    await execute('submit_review_unit_result', { ...partial, coveredSpans: [] });
+    expect(capture.getResult()!.coveredSpanIds).toEqual([]);
+  });
+
+  test('missing and unknown findings have actionable diagnostics and explicit dispositions remain required', async () => {
+    const scope = assigned();
+    const rejected: { code: string; message: string }[] = [];
+    const capture = createReviewUnitCapture(scope, undefined, undefined, undefined, error =>
+      rejected.push(error)
+    );
+    const { execute } = await harness(capture.factory);
+    const bad = { ...reviewed(), findings: [{ ...reviewed().findings[0]!, id: 'F9' }] };
+    await expect(execute('submit_review_unit_result', bad)).rejects.toThrow('F2');
+    expect(rejected[0]!.message).toContain('F9');
+    for (const findings of [
+      [reviewed().findings[0]!, reviewed().findings[0]!, reviewed().findings[1]!],
+      reviewed().findings.map(finding => ({ ...finding, lifecycle: 'risk_accepted' })),
+      reviewed().findings.map(finding => ({ ...finding, dispositionReason: '' })),
+    ]) {
+      await expect(
+        execute('submit_review_unit_result', { ...reviewed(), findings })
+      ).rejects.toThrow();
+    }
+    expect(capture.getResult()).toBeUndefined();
+    await execute('submit_review_unit_result', reviewed());
+    expect(capture.getResult()!.findings).toEqual(reviewed().findings);
+  });
+
+  test('rejects expanded host result over 6 KiB even when model input is compact', async () => {
+    const scope = assigned();
+    scope.spans = scope.spans.map(span => ({ ...span, id: span.id + 'x'.repeat(600) }));
+    const capture = createReviewUnitCapture(scope);
+    const { execute } = await harness(capture.factory);
+    expect(Buffer.byteLength(JSON.stringify(reviewed()))).toBeLessThan(6144);
+    await expect(execute('submit_review_unit_result', reviewed())).rejects.toThrow('6144');
+    expect(capture.getResult()).toBeUndefined();
+  });
+
+  test('strict model schema rejects legacy payloads, extra fields and reviewed shortrefs', async () => {
+    const scope = assigned();
+    const capture = createReviewUnitCapture(scope);
+    const { execute } = await harness(capture.factory);
+    for (const extra of [
+      { unitId: scope.id },
+      { coveredSpanIds: [] },
+      { reconciledFindingIds: [] },
+      { coveredSpans: [] },
+      { arbitrary: true },
+    ]) {
+      await expect(
+        execute('submit_review_unit_result', { ...reviewed(), ...extra })
+      ).rejects.toThrow();
+    }
+    for (const status of ['partial', 'blocked', 'failed']) {
+      await expect(
+        execute('submit_review_unit_result', {
+          ...reviewed(),
+          status,
+          limitations: ['Unavailable.'],
+        })
+      ).rejects.toThrow('coveredSpans');
+      await expect(
+        execute('submit_review_unit_result', { ...reviewed(), status, coveredSpans: [] })
+      ).rejects.toThrow('limitations');
+    }
+    await execute('submit_review_unit_result', reviewed());
+  });
+
+  test('diagnostic callback cannot replace original async validator failure or leak its message', async () => {
+    const original = new Error('secret validator source');
+    const rejected: { code: string; message: string }[] = [];
+    let fail = true;
+    const capture = createReviewUnitCapture(
+      unit,
+      async () => {
+        if (fail) {
+          throw original;
+        }
+      },
+      undefined,
+      undefined,
+      diagnostic => {
+        rejected.push(diagnostic);
+        throw new Error('callback failure');
+      }
+    );
+    const { execute } = await harness(capture.factory);
+    await expect(execute('submit_review_unit_result', receipt())).rejects.toBe(original);
+    expect(JSON.stringify(rejected)).not.toContain('secret');
+    expect(capture.getResult()).toBeUndefined();
+    fail = false;
+    await expect(execute('submit_review_unit_result', receipt())).resolves.toMatchObject({
+      terminate: true,
+    });
+  });
+});
+
 describe('worker capture', () => {
   test('reports read exhaustion once per session without closing the submission endpoint', async () => {
     const warnings: number[][] = [];
@@ -394,7 +569,7 @@ describe('worker capture', () => {
     expect(guard('read')).toMatchObject({ block: true });
     expect(warnings).toEqual([[3, 2]]);
     expect(guard('submit_review_unit_result')).toBeUndefined();
-    await execute('submit_review_unit_result', result());
+    await execute('submit_review_unit_result', receipt());
     capture.reset();
     guard('read');
     guard('review_file_digests', undefined, { paths: ['first', 'second'] });
@@ -411,10 +586,10 @@ describe('worker capture', () => {
       execute('submit_review_unit_result', { ...result(), coveredSpanIds: [] })
     ).rejects.toThrow();
     await expect(
-      execute('submit_review_unit_result', { ...result(), assessment: 'é'.repeat(3100) })
+      execute('submit_review_unit_result', { ...receipt(), assessment: 'é'.repeat(3100) })
     ).rejects.toThrow('6144');
     expect(capture.getResult()).toBeUndefined();
-    await expect(execute('submit_review_unit_result', result())).resolves.toMatchObject({
+    await expect(execute('submit_review_unit_result', receipt())).resolves.toMatchObject({
       terminate: true,
     });
     const received = capture.getResult()!;
@@ -430,22 +605,22 @@ describe('worker capture', () => {
       }
     });
     const { execute } = await harness(capture.factory);
-    await expect(execute('submit_review_unit_result', result())).rejects.toThrow('host rejected');
+    await expect(execute('submit_review_unit_result', receipt())).rejects.toThrow('host rejected');
     invalid = false;
     await expect(
-      execute('submit_review_unit_result', result(), AbortSignal.abort())
+      execute('submit_review_unit_result', receipt(), AbortSignal.abort())
     ).rejects.toThrow();
     await expect(
-      execute('submit_review_unit_result', result(), undefined, AbortSignal.abort())
+      execute('submit_review_unit_result', receipt(), undefined, AbortSignal.abort())
     ).rejects.toThrow();
     const replies = await Promise.allSettled([
-      execute('submit_review_unit_result', result()),
-      execute('submit_review_unit_result', result()),
+      execute('submit_review_unit_result', receipt()),
+      execute('submit_review_unit_result', receipt()),
     ]);
     expect(replies.map(reply => reply.status)).toEqual(['fulfilled', 'rejected']);
     capture.reset();
     expect(capture.getResult()).toBeUndefined();
-    await expect(execute('submit_review_unit_result', result())).resolves.toMatchObject({
+    await expect(execute('submit_review_unit_result', receipt())).resolves.toMatchObject({
       terminate: true,
     });
   });
@@ -474,10 +649,10 @@ describe('worker capture', () => {
     expect(guard('read')).toMatchObject({ block: true });
     expect(guard('submit_review_unit_result')).toBeUndefined();
     const partial = {
-      ...result(),
+      ...receipt(),
       status: 'partial',
       limitations: ['Read-tool budget exhausted.'],
-      coveredSpanIds: [],
+      coveredSpans: [],
     };
     await expect(execute('submit_review_unit_result', partial)).resolves.toMatchObject({
       terminate: true,

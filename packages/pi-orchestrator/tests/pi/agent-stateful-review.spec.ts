@@ -132,17 +132,21 @@ async function workHarness(role: 'worker' | 'synthesis', stopReason = 'stop') {
       prompt: async () => {
         if (submit) {
           const name = role === 'worker' ? 'submit_review_unit_result' : 'request_review_followup';
-          await tools
-            .get(name)!
-            .execute(
-              'result',
-              role === 'worker'
-                ? unitResult
-                : { requests: [{ paths: ['src/file.ts'], question: 'Check the caller contract' }] },
-              undefined,
-              undefined,
-              {} as ExtensionToolContext
-            );
+          await tools.get(name)!.execute(
+            'result',
+            role === 'worker'
+              ? {
+                  status: unitResult.status,
+                  assessment: unitResult.assessment,
+                  limitations: unitResult.limitations,
+                  findings: unitResult.findings,
+                  followUps: unitResult.followUps,
+                }
+              : { requests: [{ paths: ['src/file.ts'], question: 'Check the caller contract' }] },
+            undefined,
+            undefined,
+            {} as ExtensionToolContext
+          );
           submit = false;
         }
       },

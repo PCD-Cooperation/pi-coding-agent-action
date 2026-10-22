@@ -1,59 +1,117 @@
 import { writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { Agent } from '../../../src/pi/agent';
 import type { PlatformProvider } from '../../../src/platform';
 import type { ReviewUnitResult, ReviewWorkUnit } from '../../../src/review/work-types';
+import type { FindingInput } from '../../../src/review/types';
 
 const cwd = process.env.FIXTURE_DIR!;
 writeFileSync(join(cwd, 'AGENTS.md'), 'AMBIENT_CONTEXT_MUST_NOT_LEAK');
 writeFileSync(join(cwd, 'evidence.txt'), 'Pinned review evidence');
+const mode = process.env.FIXTURE_ROLE ?? 'worker';
+const worker = mode.startsWith('worker');
+const recovery = mode === 'worker-recovery';
+const finding: FindingInput = {
+  id: 'F1',
+  rootCause: 'Missing tenant predicate',
+  origin: 'pr_introduced',
+  lifecycle: 'fixed',
+  material: true,
+  location: 'evidence.txt:1',
+  evidence: 'Pinned head restores tenant filtering.',
+  originEvidence: 'Pinned merge-base omitted tenant filtering.',
+  dispositionReason: 'The required tenant predicate is restored.',
+};
 const unit: ReviewWorkUnit = {
   id: 'unit-1',
   kind: 'diff',
   basis: 'full',
   paths: ['evidence.txt'],
-  spans: [],
-  findingIds: [],
+  spans: recovery
+    ? Array.from({ length: 12 }, (_, index) => ({
+        id: createHash('sha256').update(`span-${index}`).digest('hex'),
+        fileId: 'file-1',
+        path: 'evidence.txt',
+        previousPath: null,
+        status: 'modified',
+        binary: false,
+        oldBlob: 'base',
+        newBlob: 'head',
+        patchPath: '/patch',
+        patchStartLine: 1,
+        patchEndLine: 1,
+        oldStart: 1,
+        oldLines: 1,
+        newStart: 1,
+        newLines: 1,
+      }))
+    : [],
+  findingIds: recovery ? ['F1'] : [],
   question: 'Review evidence',
 };
 const unitResult: ReviewUnitResult = {
   unitId: unit.id,
   status: 'reviewed',
-  coveredSpanIds: [],
-  reconciledFindingIds: [],
+  coveredSpanIds: unit.spans.map(span => span.id),
+  reconciledFindingIds: [...unit.findingIds],
   assessment: 'The pinned evidence has been inspected.',
   limitations: [],
-  findings: [],
+  findings: recovery ? [finding] : [],
   followUps: [],
 };
+const modelResult = {
+  status: unitResult.status,
+  assessment: unitResult.assessment,
+  limitations: unitResult.limitations,
+  findings: unitResult.findings,
+  followUps: unitResult.followUps,
+};
+const warnings: string[] = [];
 let requests = 0;
 const toolSets: string[][] = [];
+const submitProperties: string[][] = [];
+let rejection = '';
 let readSucceeded = false;
-const mode = process.env.FIXTURE_ROLE ?? 'worker';
 globalThis.fetch = async (_input, init) => {
   const body = JSON.parse(String(init?.body)) as {
-    tools: { name: string }[];
+    tools: { name: string; input_schema?: { properties?: Record<string, unknown> } }[];
     messages: unknown[];
   };
   if (JSON.stringify(body).includes('AMBIENT_CONTEXT_MUST_NOT_LEAK')) {
     throw new Error('Ambient context leaked');
   }
   toolSets.push(body.tools.map(tool => tool.name));
+  const submit = body.tools.find(tool => tool.name === 'submit_review_unit_result');
+  if (submit) {
+    submitProperties.push(Object.keys(submit.input_schema?.properties ?? {}));
+  }
   requests++;
+  if (requests >= 3) {
+    rejection += JSON.stringify(body.messages.at(-1)) + '\n';
+  }
   if (requests === 2) {
     readSucceeded = JSON.stringify(body.messages).includes('Pinned review evidence');
   }
   const name =
-    requests === 1
-      ? 'read'
-      : mode === 'worker'
-        ? 'submit_review_unit_result'
-        : 'request_review_followup';
+    requests === 1 ? 'read' : worker ? 'submit_review_unit_result' : 'request_review_followup';
   const args =
     requests === 1
       ? { path: join(cwd, 'evidence.txt') }
-      : mode === 'worker'
-        ? unitResult
+      : worker
+        ? {
+            ...modelResult,
+            ...(recovery && requests === 2
+              ? {
+                  status: 'partial',
+                  coveredSpans: ['S13'],
+                  limitations: ['Inspection remains.'],
+                  findings: [],
+                }
+              : recovery && requests === 3
+                ? { findings: [] }
+                : {}),
+          }
         : {
             requests: [
               { paths: ['evidence.txt'], question: 'Verify the external caller contract.' },
@@ -109,7 +167,13 @@ globalThis.fetch = async (_input, init) => {
 };
 const noop = () => undefined;
 const agent = new Agent(
-  { debug: noop, info: noop, warning: noop, error: noop, notice: noop },
+  {
+    debug: noop,
+    info: noop,
+    warning: message => warnings.push(message),
+    error: noop,
+    notice: noop,
+  },
   { type: 'github' } as PlatformProvider,
   {
     provider: 'anthropic',
@@ -133,13 +197,24 @@ const agent = new Agent(
       'request_review_followup',
       'submit_review_unit_result',
     ],
-    ...(mode === 'worker' ? { reviewWorkUnit: unit } : { reviewCoverageSynthesis: true }),
+    ...(worker ? { reviewWorkUnit: unit } : { reviewCoverageSynthesis: true }),
   }
 );
 try {
   await agent.ready();
   const result = await agent.run('Inspect evidence and return structured data.');
-  console.info(JSON.stringify({ result, toolSets, requests, readSucceeded }));
+  console.info(
+    JSON.stringify({
+      result,
+      toolSets,
+      requests,
+      readSucceeded,
+      warnings,
+      expectedSpanIds: unit.spans.map(span => span.id),
+      rejection,
+      submitProperties,
+    })
+  );
 } finally {
   await agent.dispose();
 }

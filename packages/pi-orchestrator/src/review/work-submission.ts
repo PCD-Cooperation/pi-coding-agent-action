@@ -1,4 +1,5 @@
 import { Type } from 'typebox';
+import type { Static } from 'typebox';
 import { Check } from 'typebox/value';
 import type { ExtensionFactory } from '@earendil-works/pi-coding-agent';
 import {
@@ -48,6 +49,146 @@ export function reviewUnitResultSchema(unit?: ReviewWorkUnit) {
   );
 }
 
+export interface ReviewReceiptRejection {
+  code: string;
+  message: string;
+}
+
+class ReviewReceiptError extends Error {
+  constructor(
+    readonly code: string,
+    message: string
+  ) {
+    super(message);
+  }
+}
+
+export function reviewSpanReferences(unit: ReviewWorkUnit): { ref: string; spanId: string }[] {
+  return unit.spans.map((span, index) => ({ ref: `S${index + 1}`, spanId: span.id }));
+}
+
+function reviewUnitToolSchema(unit: ReviewWorkUnit) {
+  const common = {
+    assessment: nonblank(),
+    findings: Type.Array(FindingInputSchema),
+    followUps: Type.Array(ReviewWorkFollowUpSchema, { maxItems: 8 }),
+  };
+  const references = reviewSpanReferences(unit);
+  return Type.Object(
+    {
+      ...common,
+      status: Type.Union([
+        Type.Literal('reviewed'),
+        Type.Literal('partial'),
+        Type.Literal('blocked'),
+        Type.Literal('failed'),
+      ]),
+      limitations: Type.Array(nonblank()),
+      coveredSpans: Type.Optional(
+        Type.Array(
+          references.length
+            ? Type.Union(references.map(({ ref }) => Type.Literal(ref)))
+            : Type.Never(),
+          { uniqueItems: true }
+        )
+      ),
+    },
+    { additionalProperties: false }
+  );
+}
+
+function safeReceiptLabels(values: string[], prefix: 'S' | 'F'): string {
+  const pattern = prefix === 'S' ? /^S\d{1,6}$/ : /^F\d{1,6}$/;
+  return values
+    .slice(0, 12)
+    .map(value => (pattern.test(value) ? value : '[invalid ID]'))
+    .join(', ');
+}
+
+export function parseReviewUnitReceipt(value: unknown, unit: ReviewWorkUnit): ReviewUnitResult {
+  const references = reviewSpanReferences(unit);
+  if (
+    value &&
+    typeof value === 'object' &&
+    'coveredSpans' in value &&
+    Array.isArray(value.coveredSpans)
+  ) {
+    const refs: unknown[] = value.coveredSpans;
+    const invalid = refs.filter(
+      ref => typeof ref !== 'string' || !references.some(item => item.ref === ref)
+    );
+    if (invalid.length) {
+      throw new ReviewReceiptError(
+        'span_scope',
+        `Invalid shortrefs: ${
+          safeReceiptLabels(
+            invalid.filter((ref): ref is string => typeof ref === 'string'),
+            'S'
+          ) || '[invalid ID]'
+        }. Allowed references: ${references.length ? `S1..S${references.length}` : 'none'}.`
+      );
+    }
+    if (new Set(refs).size !== refs.length) {
+      throw new ReviewReceiptError(
+        'duplicate_spans',
+        'Duplicate shortrefs; coveredSpans must be unique.'
+      );
+    }
+  }
+  if (!Check(reviewUnitToolSchema(unit), value)) {
+    throw new ReviewReceiptError(
+      'receipt_shape',
+      'Invalid model receipt fields. Reviewed requires empty limitations and no coverage or host IDs; other statuses require coveredSpans and nonempty limitations.'
+    );
+  }
+  if (
+    value.status === 'reviewed'
+      ? 'coveredSpans' in value || value.limitations.length > 0
+      : !Array.isArray(value.coveredSpans) || value.limitations.length === 0
+  ) {
+    throw new ReviewReceiptError(
+      'receipt_coverage',
+      'Reviewed must omit coveredSpans and have no limitations; partial, blocked, and failed require coveredSpans and nonempty limitations.'
+    );
+  }
+  const findingIds = value.findings.flatMap(finding => (finding.id === null ? [] : [finding.id]));
+  const unknown = findingIds.filter(id => !unit.findingIds.includes(id));
+  const missing =
+    value.status === 'reviewed' ? unit.findingIds.filter(id => !findingIds.includes(id)) : [];
+  if (unknown.length || missing.length) {
+    throw new ReviewReceiptError(
+      'finding_scope',
+      `Finding IDs outside assigned scope: ${safeReceiptLabels(unknown, 'F') || 'none'}; missing explicit findings: ${safeReceiptLabels(missing, 'F') || 'none'}.`
+    );
+  }
+  return parseReviewUnitResult(
+    {
+      unitId: unit.id,
+      status: value.status,
+      coveredSpanIds:
+        value.status === 'reviewed'
+          ? references.map(item => item.spanId)
+          : value.coveredSpans!.map(ref => references.find(item => item.ref === ref)!.spanId),
+      reconciledFindingIds: findingIds,
+      assessment: value.assessment,
+      limitations: value.limitations,
+      findings: value.findings,
+      followUps: value.followUps,
+    },
+    unit
+  );
+}
+
+function receiptRejection(error: unknown): ReviewReceiptRejection {
+  if (error instanceof ReviewReceiptError) {
+    return { code: error.code, message: error.message };
+  }
+  return {
+    code: 'validation_rejected',
+    message: 'Review result rejected by host validation. No result was captured.',
+  };
+}
+
 export const ReviewFollowUpsSchema = Type.Object(
   { requests: Type.Array(ReviewWorkFollowUpSchema, { minItems: 1, maxItems: 8 }) },
   { additionalProperties: false }
@@ -55,7 +196,8 @@ export const ReviewFollowUpsSchema = Type.Object(
 
 function requireBudget(value: unknown, bytes: number): void {
   if (Buffer.byteLength(JSON.stringify(value), 'utf8') > bytes) {
-    throw new Error(
+    throw new ReviewReceiptError(
+      'output_budget',
       `Review output exceeds ${bytes} UTF-8 JSON bytes; shorten and resubmit. No result was captured.`
     );
   }
@@ -106,10 +248,10 @@ export function parseReviewUnitResult(value: unknown, unit?: ReviewWorkUnit): Re
   validateFollowUpPaths(result.followUps);
   const findingIds = result.findings.flatMap(finding => (finding.id === null ? [] : [finding.id]));
   if (new Set(findingIds).size !== findingIds.length) {
-    throw new Error('Review finding IDs must be unique.');
+    throw new ReviewReceiptError('duplicate_findings', 'Review finding IDs must be unique.');
   }
   if (result.findings.some(finding => finding.lifecycle === 'risk_accepted')) {
-    throw new Error('Workers cannot accept risk.');
+    throw new ReviewReceiptError('risk_acceptance', 'Workers cannot accept risk.');
   }
   if (
     result.status === 'reviewed' ? result.limitations.length > 0 : result.limitations.length === 0
@@ -213,12 +355,21 @@ export function createReviewUnitCapture(
   assignedUnit: ReviewWorkUnit,
   validate?: (result: ReviewUnitResult) => void | Promise<void>,
   toolBudget?: number,
-  onReadBudgetExhausted?: (attempted: number, limit: number) => void
+  onReadBudgetExhausted?: (attempted: number, limit: number) => void,
+  onRejected?: (rejection: ReviewReceiptRejection) => void
 ): ReviewUnitCapture {
   const unit = structuredClone(assignedUnit);
   let result: ReviewUnitResult | undefined;
   const reservation = createSubmissionReservation();
   const guard = readOnlyGuard(['submit_review_unit_result'], toolBudget, onReadBudgetExhausted);
+  const parameters = reviewUnitToolSchema(unit);
+  const reportRejection = (error: unknown) => {
+    try {
+      onRejected?.(receiptRejection(error));
+    } catch {
+      // Diagnostics must not replace the original validation failure.
+    }
+  };
   return {
     getResult: () => (result ? structuredClone(result) : undefined),
     reset: () => {
@@ -233,8 +384,18 @@ export function createReviewUnitCapture(
         label: 'Submit review unit result',
         exposure: 'model-only',
         description:
-          'Capture exactly one result for the assigned unit (maximum 6 KiB JSON). Report limitations honestly. Only the host publishes results.',
-        parameters: reviewUnitResultSchema(unit),
+          'Submit one full snapshot for the assigned unit (expanded host result maximum 6 KiB JSON). Reviewed explicitly acknowledges the whole assigned unit; omit coveredSpans and report every prior finding disposition. Other statuses require unique assigned shortrefs in coveredSpans (possibly empty) and nonempty limitations. Only the host assigns coverage IDs and publishes results.',
+        parameters,
+        // The SDK validates arguments before execute; diagnose without capturing.
+        prepareArguments: args => {
+          try {
+            parseReviewUnitReceipt(args, unit);
+            return args as Static<typeof parameters>;
+          } catch (error) {
+            reportRejection(error);
+            throw error;
+          }
+        },
         execute: async (_id, params, signal, _update, ctx) => {
           signal?.throwIfAborted();
           ctx.signal?.throwIfAborted();
@@ -242,7 +403,7 @@ export function createReviewUnitCapture(
             'Review unit result has already been submitted or is being validated.'
           );
           try {
-            const candidate = parseReviewUnitResult(params, unit);
+            const candidate = parseReviewUnitReceipt(params, unit);
             await validate?.(structuredClone(candidate));
             signal?.throwIfAborted();
             ctx.signal?.throwIfAborted();
@@ -250,6 +411,7 @@ export function createReviewUnitCapture(
             result = candidate;
           } catch (error) {
             ticket.release();
+            reportRejection(error);
             throw error;
           }
           return {
