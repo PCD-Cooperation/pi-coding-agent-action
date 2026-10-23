@@ -122,6 +122,7 @@ export { getWorkflowRunLogs } from './tools/get-workflow-run-logs';
 export {
   commitAndPushBranch,
   appendCoAuthoredBy,
+  createGit,
   getNoreplyEmail,
   hasLocalChanges,
   workspaceHasChanges,

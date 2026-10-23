@@ -161,6 +161,8 @@ export interface PromptResult {
    * instead of posting a misleading success comment.
    */
   error: string | undefined;
+  /** Session-level cancellation, including aborts without a final assistant message. */
+  aborted?: boolean;
 }
 
 /**

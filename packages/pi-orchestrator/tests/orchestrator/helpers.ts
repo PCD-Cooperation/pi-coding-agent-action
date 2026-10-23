@@ -17,6 +17,7 @@ export interface AgentRunOverrides {
   result?: string;
   sessionStats?: Record<string, unknown> | undefined;
   error?: string | undefined;
+  aborted?: boolean;
 }
 
 /** Configure the agent's `run` mock to resolve with the given overrides. */
@@ -25,6 +26,7 @@ export function setAgentRunResult(agent: PiAgent, overrides: AgentRunOverrides =
     result: overrides.result ?? '',
     sessionStats: overrides.sessionStats ?? undefined,
     error: overrides.error ?? undefined,
+    aborted: overrides.aborted ?? false,
   }));
   (agent as any).run = fn;
   return fn;

@@ -303,7 +303,11 @@ export const loggingFactory = (
 
     emitLogLines(logger, formatToolsSection(pi.getAllTools()));
     emitLogLines(logger, formatSystemPromptSection(ctx.getSystemPrompt()));
-    emitLogLines(logger, formatUserPromptSection(event.prompt, event.images));
+    if (event.messageType === 'user') {
+      emitLogLines(logger, formatUserPromptSection(event.prompt, event.images));
+    } else {
+      emitLogLines(logger, [info('👤 Starting Message'), info('(extension-triggered run)')]);
+    }
 
     logger.endGroup?.();
 

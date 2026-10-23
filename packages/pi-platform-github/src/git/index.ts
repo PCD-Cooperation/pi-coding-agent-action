@@ -12,6 +12,7 @@ export { createLogger } from './types';
 export type { CommitAndPushOptions, WorkspaceChangePaths, GitIdentityOptions } from './git-cli';
 export {
   appendCoAuthoredBy,
+  createGit,
   ensureGitIdentity,
   getNoreplyEmail,
   hasLocalChanges,

@@ -29,6 +29,14 @@ import { GITHUB_IGNORE_PATTERNS } from '../constants';
 const DEFAULT_GIT_NAME = 'Pi';
 const DEFAULT_GIT_EMAIL = 'pi@noreply.pi.local';
 
+// CI config isolation and SSH transport must survive simple-git v4's environment guard.
+export function createGit(cwd: string): SimpleGit {
+  return simpleGit({
+    baseDir: cwd,
+    allowEnvironment: ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_SSH_COMMAND'],
+  });
+}
+
 /**
  * Platform context used to choose the correct "noreply" email domain.
  */
@@ -174,7 +182,7 @@ export async function ensureGitIdentity(
  * @returns `true` when there are staged, unstaged, or untracked changes.
  */
 export async function workspaceHasChanges(cwd: string): Promise<boolean> {
-  return hasLocalChanges(simpleGit(cwd));
+  return hasLocalChanges(createGit(cwd));
 }
 
 /**
@@ -217,7 +225,7 @@ export interface WorkspaceChangePaths {
  * @returns Filtered changed and deleted paths.
  */
 export async function getWorkspaceChangePaths(cwd: string): Promise<WorkspaceChangePaths> {
-  const git = simpleGit(cwd);
+  const git = createGit(cwd);
   const output = await git.raw(['status', '--porcelain', '-uall']);
 
   const ig = ignore().add([...GITHUB_IGNORE_PATTERNS]);
@@ -425,7 +433,7 @@ export interface CommitAndPushOptions {
 export async function commitAndPushBranch(options: CommitAndPushOptions): Promise<string> {
   const { cwd, branchName, message, isNewBranch, actor, log } = options;
 
-  const git = simpleGit(cwd);
+  const git = createGit(cwd);
 
   // Ensure git identity is configured (Forgejo runners have none)
   await ensureGitIdentity(git, actor, log, options.gitIdentityOptions);

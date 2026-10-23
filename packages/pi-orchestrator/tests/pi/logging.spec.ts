@@ -194,6 +194,28 @@ describe('createLoggingFactory compaction events', () => {
     return { messages, handlers };
   }
 
+  test.each([
+    {
+      event: { type: 'before_agent_start', messageType: 'user', prompt: 'Review the PR' },
+      expected: 'Review the PR',
+    },
+    {
+      event: {
+        type: 'before_agent_start',
+        messageType: 'custom',
+        message: { customType: 'review', content: 'Continue' },
+      },
+      expected: '(extension-triggered run)',
+    },
+  ])('logs the starting message for $event.messageType events', async ({ event, expected }) => {
+    const { messages, handlers } = setup();
+    await handlers.get('before_agent_start')!(event, {
+      model: undefined,
+      getSystemPrompt: () => 'Trusted policy',
+    });
+    expect(messages.some(message => message.text.includes(expected))).toBe(true);
+  });
+
   test('subscribes to session_before_compact and session_compact', () => {
     const { handlers } = setup();
     expect(handlers.has('session_before_compact')).toBe(true);

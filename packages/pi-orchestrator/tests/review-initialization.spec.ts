@@ -78,6 +78,21 @@ describe('review publication rendering', () => {
     }
   );
 
+  it('rejects a cancelled complete result before any publication', async () => {
+    const f = fixture();
+    const prepared = await prepareReview(f.provider, f.config, 'Review');
+    await expect(
+      commitReview(f.provider, prepared, {
+        result: 'Partial review',
+        review: submission,
+        sessionStats: undefined,
+        error: undefined,
+        aborted: true,
+      })
+    ).rejects.toThrow('Stateful review session was aborted');
+    expect(f.platform.publish).not.toHaveBeenCalled();
+  });
+
   it('publishes explicit root and linked child metadata without changing legacy rendering', async () => {
     const f = fixture();
     const prepared = await prepareReview(f.provider, f.config, 'Review');
