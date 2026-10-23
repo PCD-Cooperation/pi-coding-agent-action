@@ -117,8 +117,13 @@ export async function executeCoverageAgent(
         }
       }),
     ]);
-    if (response.error) {
-      throw new Error('Coverage model execution failed');
+    signal.throwIfAborted();
+    if (response.error || response.aborted) {
+      throw new Error(
+        response.aborted
+          ? 'Coverage model execution was aborted'
+          : 'Coverage model execution failed'
+      );
     }
     return response;
   } finally {

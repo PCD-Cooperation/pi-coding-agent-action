@@ -276,8 +276,8 @@ export async function commitReview(
   prepared: PreparedReview,
   result: PromptResult
 ): Promise<{ body: string; state: ReviewState }> {
-  if (result.error) {
-    throw new Error(result.error);
+  if (result.error || result.aborted) {
+    throw new Error(result.error ?? 'Stateful review session was aborted.');
   }
   if (!result.review) {
     throw new Error('Stateful review did not submit a structured result.');

@@ -310,6 +310,26 @@ describe('ActionOrchestrator', () => {
       expect(mockOutputSink.setOutput).toHaveBeenCalledWith('success', true);
     });
 
+    test('a cancelled session cannot publish its captured complete review', async () => {
+      await createOrchestrator().execute();
+      const previous = structuredClone(record);
+      vi.mocked(capability.publish).mockClear();
+      const result = await mockPiAgent.run('fixture');
+      mockPiAgent.run = vi.fn(async () => ({ ...result, aborted: true }));
+      await createOrchestrator({
+        reviewControl: 'full',
+        reviewControlReason: 'Cancellation regression.',
+      }).execute();
+      expect(record).toEqual(previous);
+      expect(capability.publish).not.toHaveBeenCalled();
+      expect(mockGit.createFinalComment).not.toHaveBeenCalled();
+      expect(mockOutputSink.setOutput).toHaveBeenCalledWith('success', false);
+      expect(mockOutputSink.setFailed).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'Agent session was aborted before completing' })
+      );
+      expect(mockPiAgent.dispose).toHaveBeenCalled();
+    });
+
     test('validates transitions inside the model result tool, then revalidates at commit', async () => {
       mockPiFactory.mockImplementation((config: PiConfig) => {
         expect(config.reviewSubmissionValidator).toBeTypeOf('function');
@@ -1403,6 +1423,21 @@ describe('ActionOrchestrator', () => {
       await orchestrator.execute();
 
       expect(mockPiAgent.exportSessionHtml).toHaveBeenCalled();
+    });
+
+    test('reports cancellation with partial output as a failure and disposes the session', async () => {
+      setAgentRunResult(mockPiAgent, { result: 'Partial review', aborted: true });
+      await createOrchestrator().execute();
+      const [body] = getFinalCommentCall(mockGit);
+      expect(body).toBe(
+        'Partial review\n\n---\n\n❌ Agent session ended with error: Agent session was aborted before completing'
+      );
+      expect(mockOutputSink.setOutput).toHaveBeenCalledWith('success', false);
+      expect(mockOutputSink.setFailed).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'Agent session was aborted before completing' })
+      );
+      expect(mockCore.info).not.toHaveBeenCalledWith('✅ Agent session completed');
+      expect(mockPiAgent.dispose).toHaveBeenCalled();
     });
 
     test('deletes reaction when session ends with error', async () => {

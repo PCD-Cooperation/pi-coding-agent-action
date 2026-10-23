@@ -111,6 +111,7 @@ export class Agent {
    * time `agent_settled` fires.
    */
   private lastAgentError: string | undefined;
+  private lastRunAborted = false;
   /**
    * The session event handler registered during {@link ready}. Stored as
    * a field so that test helpers can wire mock sessions to dispatch events
@@ -540,6 +541,7 @@ export class Agent {
           // or queued continuations will fire. Route the prompt-complete
           // callback here for cleaner lifecycle semantics (the agent is
           // truly done, not just one iteration finished).
+          this.lastRunAborted = event.aborted ?? false;
           this.events.onPromptComplete?.();
           break;
         default:
@@ -689,6 +691,7 @@ export class Agent {
     // Reset error state for this run. The agent_end event handler will
     // populate this field during the session.
     this.lastAgentError = undefined;
+    this.lastRunAborted = false;
 
     this.reviewSubmissionCapture?.reset();
     this.reviewUnitCapture?.reset();
@@ -708,6 +711,7 @@ export class Agent {
     const result = this.outputChunks.join('');
     const sessionStats = this.collectSessionStats();
     const error = this.lastAgentError;
+    const aborted = this.lastRunAborted;
 
     if (
       this.config.statefulReview ||
@@ -721,6 +725,7 @@ export class Agent {
         .find(message => message.role === 'assistant');
       if (
         error ||
+        aborted ||
         (finalAssistant?.role === 'assistant' &&
           ['error', 'aborted'].includes(finalAssistant.stopReason))
       ) {
@@ -733,19 +738,19 @@ export class Agent {
             'Incomplete review: submit_review_unit_result was not called successfully.'
           );
         }
-        return { result, sessionStats, error, reviewUnit };
+        return { result, sessionStats, error, aborted, reviewUnit };
       }
       const reviewFollowUps = this.reviewSynthesisCapture?.getFollowUps();
       if (reviewFollowUps) {
-        return { result, sessionStats, error, reviewFollowUps };
+        return { result, sessionStats, error, aborted, reviewFollowUps };
       }
       const review = this.reviewSubmissionCapture?.getSubmission();
       if (!review) {
         throw new Error('Incomplete review: submit_review_result was not called successfully.');
       }
-      return { result, sessionStats, error, review };
+      return { result, sessionStats, error, aborted, review };
     }
-    return { result, sessionStats, error };
+    return { result, sessionStats, error, aborted };
   }
 
   /**

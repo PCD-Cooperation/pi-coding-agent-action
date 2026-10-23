@@ -528,6 +528,7 @@ describe('Agent', () => {
           version: expect.any(String),
         },
         error: undefined,
+        aborted: false,
       });
     });
 
@@ -549,6 +550,7 @@ describe('Agent', () => {
         result: '',
         sessionStats: undefined,
         error: undefined,
+        aborted: false,
       });
     });
 
@@ -575,6 +577,7 @@ describe('Agent', () => {
           version: expect.any(String),
         },
         error: undefined,
+        aborted: false,
       });
     });
 
@@ -601,6 +604,7 @@ describe('Agent', () => {
           version: expect.any(String),
         },
         error: undefined,
+        aborted: false,
       });
     });
 
@@ -704,6 +708,27 @@ describe('Agent', () => {
 
       await agent.run('Hello');
       expect(onComplete).toHaveBeenCalledTimes(1);
+    });
+
+    test('surfaces session cancellation without a final message and resets it on reuse', async () => {
+      const agent = createRealAgent();
+      await agent.ready();
+      let listener: ((event: MockSessionEvent) => void) | undefined;
+      injectMockSession(agent, {
+        ...buildMockSession({ messages: [] }),
+        prompt: async () => {
+          listener?.({ type: 'agent_settled', aborted: true });
+        },
+        subscribe: callback => {
+          listener = callback;
+        },
+      });
+      await expect(agent.run('Review')).resolves.toMatchObject({
+        aborted: true,
+        error: undefined,
+      });
+      injectMockSession(agent, buildMockSession({ messages: [] }));
+      await expect(agent.run('Retry')).resolves.toMatchObject({ aborted: false });
     });
 
     test('onPromptComplete is NOT called for individual agent_end events', async () => {

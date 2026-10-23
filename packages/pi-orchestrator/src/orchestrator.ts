@@ -178,6 +178,17 @@ export class ActionOrchestrator {
         return;
       }
 
+      if (response.aborted) {
+        await this.handleSessionError(
+          'Agent session was aborted before completing',
+          result,
+          startTime,
+          reaction,
+          sessionStats
+        );
+        return;
+      }
+
       if (prepared && response.review?.coverage === 'incomplete') {
         const body = renderIncompleteReview(
           prepared.snapshot,

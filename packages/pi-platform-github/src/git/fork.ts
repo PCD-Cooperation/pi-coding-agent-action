@@ -14,7 +14,7 @@
  *    `http.<url>.*` config set up by `actions/checkout`.
  */
 
-import { simpleGit } from 'simple-git';
+import { createGit } from './git-cli';
 import type { GitHubModuleDeps } from '../types';
 import { createLogger } from './types';
 
@@ -356,7 +356,7 @@ export async function resolveForkRemoteUrl(
 ): Promise<string> {
   let originUrl: string | undefined;
   try {
-    originUrl = (await simpleGit(workspace).raw(['remote', 'get-url', 'origin'])).trim();
+    originUrl = (await createGit(workspace).raw(['remote', 'get-url', 'origin'])).trim();
   } catch {
     // No `origin` remote configured (or not a git worktree) — use the fallback.
   }

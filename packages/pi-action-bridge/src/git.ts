@@ -23,19 +23,14 @@ const defaultAccess = (path: string): void => {
   accessSync(path, constants.R_OK);
 };
 
-/**
- * Environment injected into `simple-git` subprocesses **only when** git's
- * global config can't be read (see {@link shouldIsolateGitConfig}).
- *
- * `simple-git`'s `blockUnsafeOperationsPlugin` flags `GIT_CONFIG_*` env vars
- * (category `allowUnsafeConfigPaths`) by default, so the constructor opts in
- * via `{ unsafe: { allowUnsafeConfigPaths: true } }`. This only permits the
- * config-path env vars themselves — detection commands are read-only.
- */
+// Unreadable global config aborts even read-only git commands in sandboxed agents.
 const SANDBOX_GIT_ENV = {
   GIT_CONFIG_NOSYSTEM: '1',
   GIT_CONFIG_GLOBAL: '/dev/null',
 } as const;
+
+// Preserve local config overrides and SSH transport without allowing arbitrary GIT_* variables.
+const GIT_ENV_KEYS = [...Object.keys(SANDBOX_GIT_ENV), 'GIT_SSH_COMMAND'];
 
 /**
  * Determine whether git's global/system config should be isolated.
@@ -87,19 +82,21 @@ export function shouldIsolateGitConfig(
  * Git-config isolation is applied conditionally via
  * {@link shouldIsolateGitConfig}: the sandbox env is injected only when the
  * user's global gitconfig is unreadable. In a normal local TUI the inspector
- * inherits the full process environment untouched.
+ * preserves the allowlisted config and SSH environment variables.
  */
 export function createGitInspector(
   cwd: string,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  access: (path: string) => void = defaultAccess
 ): GitInspector {
-  const isolate = shouldIsolateGitConfig(env);
+  const isolate = shouldIsolateGitConfig(env, access);
   const git = simpleGit(cwd, {
+    allowEnvironment: GIT_ENV_KEYS,
     ...(isolate ? { unsafe: { allowUnsafeConfigPaths: true } } : {}),
   });
   if (isolate) {
-    // Merge so the rest of the process env is preserved alongside the override.
-    git.env({ ...env, ...SANDBOX_GIT_ENV });
+    // Explicit env writes require v4's double opt-in; never spread ambient GIT_* values.
+    git.env({ ...SANDBOX_GIT_ENV });
   }
   return {
     isRepo: () => git.checkIsRepo(),

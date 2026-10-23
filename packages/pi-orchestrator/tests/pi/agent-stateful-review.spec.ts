@@ -39,6 +39,7 @@ async function runHarness(
     submit?: boolean;
     error?: string;
     aborted?: boolean;
+    settledAborted?: boolean;
     failedWithoutMessage?: boolean;
     throws?: boolean;
     childrenAfterSubmit?: boolean;
@@ -71,6 +72,9 @@ async function runHarness(
             undefined,
             {} as ExtensionToolContext
           );
+        }
+        if (options.settledAborted) {
+          Object.assign(agent, { lastRunAborted: true });
         }
         if (options.error) {
           Object.assign(agent, { lastAgentError: options.error });
@@ -108,7 +112,11 @@ const unitResult: ReviewUnitResult = {
   followUps: [],
 };
 
-async function workHarness(role: 'worker' | 'synthesis', stopReason = 'stop') {
+async function workHarness(
+  role: 'worker' | 'synthesis',
+  stopReason = 'stop',
+  settledAborted = false
+) {
   const agent = new Agent(logger, createMockProvider(), {
     ...config,
     ...(role === 'worker' ? { reviewWorkUnit: unit } : { reviewCoverageSynthesis: true }),
@@ -148,6 +156,9 @@ async function workHarness(role: 'worker' | 'synthesis', stopReason = 'stop') {
             {} as ExtensionToolContext
           );
           submit = false;
+        }
+        if (settledAborted) {
+          Object.assign(agent, { lastRunAborted: true });
         }
       },
       getSessionStats: () => ({ tokens: { input: 10, output: 5, total: 15 }, cost: 0 }),
@@ -324,6 +335,14 @@ describe('work role host boundary', () => {
     }
   );
 
+  test.each(['worker', 'synthesis'] as const)(
+    '%s rejects captured data when the session is cancelled after a normal assistant turn',
+    async role => {
+      const agent = await workHarness(role, 'stop', true);
+      await expect(agent.run('Review')).rejects.toThrow('failed or was aborted');
+    }
+  );
+
   test('abort awaits the SDK session becoming idle', async () => {
     const agent = await workHarness('worker');
     let resolve!: () => void;
@@ -361,6 +380,7 @@ describe('stateful review host boundary', () => {
   test.each([
     { error: 'provider failed' },
     { aborted: true },
+    { settledAborted: true },
     { throws: true },
     { failedWithoutMessage: true },
   ])('does not return an earlier submission on session failure: %j', async failure => {

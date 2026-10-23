@@ -12,6 +12,8 @@ import * as os from 'node:os';
 import { execSync } from 'node:child_process';
 import {
   appendCoAuthoredBy,
+  createGit,
+  resolveForkRemoteUrl,
   ensureGitIdentity,
   getNoreplyEmail,
   hasLocalChanges,
@@ -23,7 +25,6 @@ import {
 } from '@alexanderfortin/pi-platform-github';
 import type { GitHubModuleDeps } from '@alexanderfortin/pi-platform-github';
 import type { SimpleGit } from 'simple-git';
-import { simpleGit } from 'simple-git';
 import {
   setupGitRepo,
   setupForkGitRepo,
@@ -73,6 +74,71 @@ isolateGitConfig();
 // ---------------------------------------------------------------------------
 // getNoreplyEmail
 // ---------------------------------------------------------------------------
+
+describe('createGit environment compatibility', () => {
+  let cwd: string;
+
+  beforeEach(() => {
+    cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-git-env-'));
+    execSync('git init', { cwd, stdio: 'pipe' });
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  test('preserves explicit global config for identity and fork URL rewrites', async () => {
+    const config = path.join(cwd, 'global.gitconfig');
+    fs.writeFileSync(
+      config,
+      '[user]\nname = CI User\nemail = ci@example.test\n' +
+        '[url "https://forgejo.example.test/"]\ninsteadOf = forge:\n'
+    );
+    vi.stubEnv('GIT_CONFIG_GLOBAL', config);
+    vi.stubEnv('GIT_CONFIG_NOSYSTEM', '1');
+    const git = createGit(cwd);
+    await ensureGitIdentity(git, 'fallback');
+    expect((await git.getConfig('user.name')).value).toBe('CI User');
+    expect((await git.getConfig('user.name', 'local')).value).toBeNull();
+    await git.addRemote('origin', 'forge:owner/repo.git');
+    await expect(resolveForkRemoteUrl(cwd, { owner: 'bot', repo: 'repo' })).resolves.toBe(
+      'https://forgejo.example.test/bot/repo.git'
+    );
+  });
+
+  test('preserves SSH transport and system-config isolation for subprocesses', async () => {
+    const script = path.join(cwd, 'ssh.cjs');
+    const marker = path.join(cwd, 'ssh-env.json');
+    fs.writeFileSync(
+      script,
+      `require('node:fs').writeFileSync(${JSON.stringify(marker)}, JSON.stringify({
+        nosystem: process.env.GIT_CONFIG_NOSYSTEM,
+        ssh: process.env.GIT_SSH_COMMAND
+      })); process.exit(1);`
+    );
+    const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`;
+    vi.stubEnv('GIT_SSH_COMMAND', command);
+    vi.stubEnv('GIT_CONFIG_NOSYSTEM', '1');
+    await expect(
+      createGit(cwd).listRemote(['ssh://git@example.invalid/repo.git'])
+    ).rejects.toThrow();
+    expect(JSON.parse(fs.readFileSync(marker, 'utf-8'))).toEqual({
+      nosystem: '1',
+      ssh: command,
+    });
+  });
+
+  test('filters unrelated GIT_* overrides rather than redirecting workspace operations', async () => {
+    vi.stubEnv('GIT_DIR', path.join(cwd, 'nonexistent.git'));
+    fs.writeFileSync(path.join(cwd, 'change.txt'), 'change');
+    await expect(workspaceHasChanges(cwd)).resolves.toBe(true);
+    await expect(getWorkspaceChangePaths(cwd)).resolves.toEqual({
+      changed: ['change.txt'],
+      deleted: [],
+    });
+  });
+});
 
 describe('getNoreplyEmail', () => {
   test('returns undefined when actor is falsy', () => {
@@ -201,7 +267,7 @@ describe('ensureGitIdentity', () => {
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-git-identity-'));
     execSync('git init', { cwd: tmpDir });
-    git = simpleGit(tmpDir);
+    git = createGit(tmpDir);
   });
 
   afterEach(() => {
@@ -313,7 +379,7 @@ describe('hasLocalChanges', () => {
     execSync('git -c user.name=t -c user.email=t@t commit --allow-empty -m init', {
       cwd: tmpDir,
     });
-    git = simpleGit(tmpDir);
+    git = createGit(tmpDir);
   });
 
   afterEach(() => {
@@ -475,10 +541,10 @@ describe('checkoutExistingBranch', () => {
     });
 
     // Switch back to main so the branch is not checked out locally
-    await simpleGit(workspace).checkout('main');
+    await createGit(workspace).checkout('main');
 
     // Now checkout the existing remote branch
-    const git = simpleGit(workspace);
+    const git = createGit(workspace);
     const { log } = captureLogger();
     await checkoutExistingBranch(git, 'remote-branch', log);
 
@@ -503,7 +569,7 @@ describe('checkoutExistingBranch', () => {
       log: captureLogger().log,
     });
 
-    const git = simpleGit(workspace);
+    const git = createGit(workspace);
     await git.checkout('main');
 
     // Create an uncommitted change on main that is NOT in either branch
@@ -540,7 +606,7 @@ describe('checkoutExistingBranch', () => {
       log: captureLogger().log,
     });
 
-    const git = simpleGit(workspace);
+    const git = createGit(workspace);
 
     // Add a local-only commit that should be discarded by reset --hard.
     // We're currently on reset-test, so this adds to it ahead of origin.
@@ -579,7 +645,7 @@ describe('checkoutExistingBranch', () => {
       log: captureLogger().log,
     });
 
-    const git = simpleGit(workspace);
+    const git = createGit(workspace);
     await git.checkout('main');
 
     // On main, create an uncommitted change to the SAME file with
@@ -671,7 +737,7 @@ describe('commitAndPushBranch', () => {
     const { workspace } = repo;
 
     // Remove any identity config
-    const git = simpleGit(workspace);
+    const git = createGit(workspace);
     await git.raw(['config', '--unset', 'user.name']);
     await git.raw(['config', '--unset', 'user.email']);
 
@@ -700,7 +766,7 @@ describe('commitAndPushBranch', () => {
     const { workspace } = repo;
 
     // Remove any identity config so ensureGitIdentity fills it in
-    const git = simpleGit(workspace);
+    const git = createGit(workspace);
     await git.raw(['config', '--unset', 'user.name']);
     await git.raw(['config', '--unset', 'user.email']);
 
@@ -744,7 +810,7 @@ describe('commitAndPushBranch', () => {
     });
 
     // Now go back to main and make another change
-    const git = simpleGit(workspace);
+    const git = createGit(workspace);
     await git.checkout('main');
 
     // Make a new change
@@ -823,7 +889,7 @@ describe('ensureRemote', () => {
     if (!repo) {
       return;
     }
-    const git = simpleGit(repo.workspace);
+    const git = createGit(repo.workspace);
     const { log } = captureLogger();
 
     await ensureRemote(git, 'pi-fork', '/some/fork.git', log);
@@ -836,7 +902,7 @@ describe('ensureRemote', () => {
     if (!repo) {
       return;
     }
-    const git = simpleGit(repo.workspace);
+    const git = createGit(repo.workspace);
     const { log } = captureLogger();
 
     await ensureRemote(git, 'pi-fork', '/old/fork.git', log);
@@ -850,7 +916,7 @@ describe('ensureRemote', () => {
     if (!repo) {
       return;
     }
-    const git = simpleGit(repo.workspace);
+    const git = createGit(repo.workspace);
     const { log, messages } = captureLogger();
 
     await ensureRemote(git, 'origin', repo.remoteDir, log);
@@ -948,7 +1014,7 @@ describe('commitAndPushBranch — remote option', () => {
     });
 
     // Back on main, make another change and push it to the fork branch.
-    const git = simpleGit(workspace);
+    const git = createGit(workspace);
     await git.checkout('main');
     fs.writeFileSync(path.join(workspace, 'v2.txt'), 'v2');
 
@@ -983,7 +1049,7 @@ describe('commitAndPushBranch — remote option', () => {
     const { workspace } = repo;
 
     // Point origin at a nonexistent repository so the push fails.
-    const git = simpleGit(workspace);
+    const git = createGit(workspace);
     await git.raw(['remote', 'set-url', 'origin', '/nonexistent/repo.git']);
 
     fs.writeFileSync(path.join(workspace, 'feature.txt'), 'new feature');
@@ -1009,7 +1075,7 @@ describe('commitAndPushBranch — remote option', () => {
     const { workspace } = repo;
 
     // Pre-configure pi-fork pointing somewhere stale.
-    const git = simpleGit(workspace);
+    const git = createGit(workspace);
     await git.raw(['remote', 'add', 'pi-fork', '/stale/fork.git']);
 
     fs.writeFileSync(path.join(workspace, 'feature.txt'), 'new feature');
